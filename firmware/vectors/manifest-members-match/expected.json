@@ -1,0 +1,15 @@
+{
+  "name": "manifest-members-match",
+  "description": "A signed manifest over a capture segment and a journal whose headers agree with it.",
+  "asserts": "device_id, boot_id, vehicle_id, assignment_id, device_counter and storage_key_version in every segment header equal the manifest's, the capture segment's index matches its file name, and the journal carries the reserved index 0xFFFFFFFF. Binding checks pass.",
+  "binding": {
+    "match": true
+  },
+  "manifest": {
+    "valid": true,
+    "signature_valid": true,
+    "content_root_hex": "1da40231cc5be5532621a4997057f9d5846a109fa312de46c6f3b57420a803fd",
+    "device_public_key_hex": "f876e06990f013620b0c41bb19cb6acb367d615cb52c3d8980a57582925a4e13",
+    "canonical_bytes_sha256_hex": "c8b5565f15b7e799dea0289d29d8371c452081b4b979e539c6b84aedfa26801a"
+  }
+}

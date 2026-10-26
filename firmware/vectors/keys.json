@@ -1,0 +1,18 @@
+{
+  "WARNING": "PUBLIC TEST KEYS. These keys are committed to a public repository. They protect nothing and must never be provisioned onto a device or loaded into a real keystore.",
+  "alt_root_key_hex": "12e44cc77d3b4552bfbc2db62c599865310d05fccdc461acd39fea28da59c9fc",
+  "alt_storage_key_version": 2,
+  "assignment_id_hex": "505152535455565758595a5b5c5d5e5f",
+  "boot_id_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "device_counter": 42,
+  "device_id_hex": "101112131415161718191a1b1c1d1e1f",
+  "encryption_suite": "xchacha20poly1305+hkdf-sha256/v1",
+  "root_key_hex": "7b1a2c5cc080bc43df4922975a48987d92e3209ba6a4bb8853a23651ad9b3821",
+  "storage_key_version": 1,
+  "vehicle_id_hex": "303132333435363738393a3b3c3d3e3f",
+  "worked_example": {
+    "capture_segment_0_key_hex": "24f7191a4156d6ac88a626e1922ecf5ce32157734499a3055b9d8b4ebfcae979",
+    "journal_key_hex": "b49dff5df69fbb18337332ed516aa2fe2aa008e01e004dcd45b082a70e03667c",
+    "note": "K_seg = HKDF-SHA256(ikm=root_key, salt=vehicle_id, info=\"cairn/segment/v3\" || device_id || assignment_id || boot_id || segment_index u32le, L=32), for the identities above."
+  }
+}

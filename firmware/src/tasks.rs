@@ -309,7 +309,7 @@ fn print_stat() {
     );
 }
 
-const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | gnss cold|warm|hot | wifi scan|locate|learn <lat> <lon>|forget | prime show|time <unix_ms>|pos <lat> <lon> [alt_m] [acc_m] | assist begin|data|commit | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
+const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | vectors | gnss cold|warm|hot | wifi scan|locate|learn <lat> <lon>|forget | prime show|time <unix_ms>|pos <lat> <lon> [alt_m] [acc_m] | assist begin|data|commit | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
 
 /// A provisioning payload arriving over the console in hex lines.
 static PROV_BUF: embassy_sync::blocking_mutex::Mutex<
@@ -665,6 +665,9 @@ async fn run(cmd: &str) {
         "prov" => prov(arg),
         "prime" => prime(arg).await,
         "wifi" => wifi(arg).await,
+        "vectors" => {
+            crate::vectors::run();
+        }
         "gnss" => {
             // Restart the receiver forgetting some of what it knows, to
             // measure time to first fix and test priming. Follow `cold` with

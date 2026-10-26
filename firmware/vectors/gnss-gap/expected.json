@@ -1,0 +1,25 @@
+{
+  "name": "gnss-gap",
+  "description": "A 42-second tunnel gap between two fixes 1.1 km apart.",
+  "asserts": "The gap record is preserved verbatim. A decoder must render a discontinuity and must never join the route across it — honest incompleteness over fabricated continuity.",
+  "scan": {
+    "stop_reason": "EOF",
+    "frames_retained": 3,
+    "stop_offset": 408,
+    "discarded_tail_bytes": 0,
+    "unknown_type_count": 0,
+    "record_counts": {
+      "GNSS_GAP": 1,
+      "GNSS_SAMPLE": 2
+    },
+    "first_seq": 0,
+    "last_seq": 2
+  },
+  "keyed": {
+    "segment_key_hex": "24f7191a4156d6ac88a626e1922ecf5ce32157734499a3055b9d8b4ebfcae979",
+    "stop_reason": "EOF",
+    "frames_retained": 3,
+    "stop_offset": 408,
+    "plaintext_sha256_hex": "002771b2355c3831a592b423310e873424d6dbe2708f99cdb48ac93ca3e80376"
+  }
+}

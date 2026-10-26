@@ -149,6 +149,7 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 | `gnssid` | The GPS receiver's identity frames, for AssistNow registration |
 | `prime` | What the GPS will be told at power-on (see below) |
 | `gnss cold` | Make the GPS forget everything, to time a cold start |
+| `vectors` | Check Cairn's bundle format on the board against its conformance vectors |
 | `wifi scan` · `wifi locate` · `wifi learn <lat> <lon>` · `wifi forget` | Wi-Fi fingerprints (see below) |
 | `flush` · `mark` · `reboot` | |
 

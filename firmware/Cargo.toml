@@ -32,6 +32,11 @@ embedded-tls = { version = "0.19.0", default-features = false, features = ["rust
 rand_core = { version = "0.6", default-features = false }
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "pkcs8"] }
 signature = { version = "2.2", default-features = false }
+# Cairn bundle format v3, the same Rust implementation the dongle emulator is
+# checked with (no_std + alloc), pinned by commit.
+cairn-format = { git = "https://github.com/ParkWardRR/cairn-esp32-device-firmware", rev = "f8bd78e4f93a566d01050b30e826401784517649" }
+ed25519-dalek = { version = "3.0.0", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
 esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
 esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }

@@ -218,6 +218,26 @@ sent. After `trail prime`, the RTC read true, and a `gnss cold` + reboot gave a 
 time and priming correctly sent nothing. Position priming and the effect on time to first fix
 need open sky.
 
+## Cairn's bundle format on the board (T2, in progress)
+
+The logger is gaining Cairn's sealed `format/v3` bundles beside its CSV files. The format is not
+reimplemented here: the firmware builds **`cairn-format`**, the Rust implementation in the dongle
+repository's emulator workspace (`emulator/cairn-format`, `no_std` + `alloc`), pinned by commit in
+`firmware/Cargo.toml` — one Rust implementation for the emulator and this device.
+
+- **On the host**, `scripts/ci.sh` checks out the dongle repository at that commit and runs its
+  conformance runner: every `format/v3` vector (62 at `contracts-v0.9.0`).
+- **On the board**, `vectors` on the console runs three of them on the ESP32-S3
+  (`firmware/vectors/`, copied unchanged): a structural and keyed segment scan (`gnss-gap`: HKDF
+  segment key, XChaCha20-Poly1305 open of every frame, plaintext digest), a tampered tag that only
+  the keyed scan may catch (`auth-tag-tampered`), and a manifest (`manifest-members-match`: CBOR,
+  Ed25519 signature, content root, byte-identical re-encode, and a flipped byte refused).
+
+**Verified on the board, 2026-10-26:** `vectors: 3/3 pass on the ESP32-S3 in 122 ms`. With two
+expectations deliberately broken the board reported both failures (`1/3`), so the check can fail.
+The firmware grew from 887 KB to 1.07 MB with the format's crypto linked in. Sealing sessions into
+bundles is next.
+
 ## SD cards
 
 FAT16 or FAT32. A card formatted by macOS Disk Utility with its default scheme (GUID partition

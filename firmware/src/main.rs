@@ -19,6 +19,7 @@ mod sensors;
 mod shared;
 mod storage;
 mod tasks;
+mod vectors;
 
 use embassy_executor::Spawner;
 use esp_backtrace as _;

@@ -32,6 +32,22 @@ step "trail (host tool): format, clippy, tests, build"
 (cd tools/trail && cargo +stable test)
 (cd tools/trail && cargo +stable build --release)
 
+# The firmware builds cairn-format from the dongle repository at a pinned
+# commit. Its full conformance run -- every format/v3 vector, with the emulator
+# that commit carries -- is checked here for exactly that commit; the board
+# checks three of them itself (console: vectors).
+step "cairn-format: every format/v3 vector at the pinned commit"
+REV=$(sed -n 's/^cairn-format = .*rev = "\([0-9a-f]*\)".*/\1/p' firmware/Cargo.toml)
+[ -n "$REV" ] || { echo "no cairn-format rev in firmware/Cargo.toml"; exit 1; }
+FMT_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cairn-trail/cairn-format-$REV"
+if [ ! -d "$FMT_DIR/.git" ]; then
+  rm -rf "$FMT_DIR"
+  git clone --quiet https://github.com/ParkWardRR/cairn-esp32-device-firmware "$FMT_DIR"
+  git -C "$FMT_DIR" checkout --quiet "$REV"
+fi
+(cd "$FMT_DIR" && scripts/fetch-contracts.sh >/dev/null 2>&1 &&
+  cd emulator && cargo +stable run --release --quiet -- conformance | tail -1)
+
 step "firmware: format"
 (cd firmware && cargo fmt --check)
 

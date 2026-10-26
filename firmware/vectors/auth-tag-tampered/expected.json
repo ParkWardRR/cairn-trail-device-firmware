@@ -1,0 +1,24 @@
+{
+  "name": "auth-tag-tampered",
+  "description": "One ciphertext bit flipped in the last of four frames, with the frame CRC recomputed.",
+  "asserts": "A structural scan (no key) reaches EOF with four frames: the CRC is valid, so nothing keyless can detect this edit, which is why the CRC is only a damage detector and never an integrity guarantee. A keyed scan stops at the frame with AUTH_FAILED and retains the three before it. An auth failure is never skipped past or silently dropped.",
+  "scan": {
+    "stop_reason": "EOF",
+    "frames_retained": 4,
+    "stop_offset": 528,
+    "discarded_tail_bytes": 0,
+    "unknown_type_count": 0,
+    "record_counts": {
+      "GNSS_SAMPLE": 4
+    },
+    "first_seq": 0,
+    "last_seq": 3
+  },
+  "keyed": {
+    "segment_key_hex": "24f7191a4156d6ac88a626e1922ecf5ce32157734499a3055b9d8b4ebfcae979",
+    "stop_reason": "AUTH_FAILED",
+    "frames_retained": 3,
+    "stop_offset": 428,
+    "plaintext_sha256_hex": "177a6c983755b275695cfeb41aa2ec858d91d91273c6892687276edc12834ccd"
+  }
+}
