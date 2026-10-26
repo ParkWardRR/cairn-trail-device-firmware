@@ -19,6 +19,7 @@ use core::fmt::Write as _;
 use core::net::Ipv4Addr;
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Config as NetConfig, IpAddress, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer, with_timeout};
@@ -142,8 +143,12 @@ pub fn start(spawner: &Spawner, wifi: esp_hal::peripherals::WIFI<'static>) {
         Err(why) => {
             event(
                 "wifi",
-                format_args!("off: {} (provision with scripts/provision.py)", why),
+                format_args!(
+                    "no network: {} (`trail provision write`); radio on only to scan",
+                    why
+                ),
             );
+            spawner.spawn(scan_only_task(wifi).unwrap());
             return;
         }
     };
@@ -169,6 +174,69 @@ pub fn start(spawner: &Spawner, wifi: esp_hal::peripherals::WIFI<'static>) {
     spawner.spawn(wifi_task(controller, settings).unwrap());
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(uplink_task(stack, settings).unwrap());
+}
+
+/// One scan, published to `shared::WIFI_SCAN` for Wi-Fi fingerprinting
+/// (`trail_core::wififp`). Active, 30–100 ms a channel: about a second.
+async fn scan(controller: &mut WifiController<'_>) {
+    use esp_radio::wifi::scan::{ScanConfig, ScanTypeConfig};
+    use trail_core::wififp::{Ap, MAX_APS, select};
+    let cfg = ScanConfig::default().with_scan_type(ScanTypeConfig::Active {
+        min: esp_hal::time::Duration::from_millis(30),
+        max: esp_hal::time::Duration::from_millis(100),
+    });
+    match controller.scan_async(&cfg).await {
+        Ok(found) => {
+            let heard: Vec<Ap> = found
+                .iter()
+                .map(|a| Ap {
+                    bssid: a.bssid,
+                    rssi: a.signal_strength,
+                })
+                .collect();
+            let mut aps = [Ap::default(); MAX_APS];
+            let n = select(&heard, &mut aps);
+            crate::shared::WIFI_SCAN.lock(|s| {
+                s.replace(Some(crate::shared::WifiScan {
+                    at_ms: crate::shared::now_ms(),
+                    aps,
+                    n,
+                    heard: heard.len(),
+                }))
+            });
+            log::info!("wifi scan: {} heard, {} fixed kept", heard.len(), n);
+        }
+        Err(e) => {
+            event("wifi_scan", format_args!("failed: {:?}", e));
+            // An empty result, so a waiting caller is not left hanging.
+            crate::shared::WIFI_SCAN.lock(|s| {
+                s.replace(Some(crate::shared::WifiScan {
+                    at_ms: crate::shared::now_ms(),
+                    aps: [Ap::default(); MAX_APS],
+                    n: 0,
+                    heard: 0,
+                }))
+            });
+        }
+    }
+}
+
+/// Not provisioned: the radio is started only for each scan and stopped
+/// after it, so an unconnected logger spends nothing on Wi-Fi between scans.
+#[embassy_executor::task]
+async fn scan_only_task(mut wifi: esp_hal::peripherals::WIFI<'static>) {
+    loop {
+        crate::shared::WIFI_SCAN_REQ.wait().await;
+        match WifiController::new(wifi.reborrow(), Default::default()) {
+            Ok(mut c) => {
+                if let Err(e) = c.set_config(&WifiConfig::Station(StationConfig::default())) {
+                    event("wifi_scan", format_args!("station mode refused: {:?}", e));
+                }
+                scan(&mut c).await;
+            }
+            Err(e) => event("wifi_scan", format_args!("radio init failed: {:?}", e)),
+        }
+    }
 }
 
 #[embassy_executor::task]
@@ -211,7 +279,19 @@ async fn wifi_task(mut controller: WifiController<'static>, s: &'static Settings
                     ),
                 );
                 with_status(|st| st.wifi_up = true);
-                let why = controller.wait_for_disconnect_async().await;
+                // Stay joined; scan when asked (a station can scan while
+                // associated: it leaves the channel briefly).
+                let why = loop {
+                    match select(
+                        controller.wait_for_disconnect_async(),
+                        crate::shared::WIFI_SCAN_REQ.wait(),
+                    )
+                    .await
+                    {
+                        Either::First(why) => break why,
+                        Either::Second(()) => scan(&mut controller).await,
+                    }
+                };
                 with_status(|st| st.wifi_up = false);
                 event(
                     "wifi",

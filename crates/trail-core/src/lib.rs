@@ -10,3 +10,4 @@ pub mod gpt;
 pub mod pcf8563;
 pub mod prime;
 pub mod ubx;
+pub mod wififp;

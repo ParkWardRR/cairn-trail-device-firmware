@@ -251,7 +251,7 @@ fn print_stat() {
          imu ok={} accel_mg={:?}  mag ok={} heading={:.0}\n\
          power battery={} vbat={}mV vbus={}mV charging={} soc={}%  marks={} display={}\n\
          assistnow queued={} sent={} accepted={} not_used={}\n\
-         prime {:?} time_acc={}ms pos_acc={}m rtc_now={:?} rtc_checked={}",
+         prime {:?} time_acc={}ms pos_acc={}m rtc_now={:?} rtc_checked={} wifi_fingerprints={}",
         shared::VERSION,
         shared::FLAVOUR,
         shared::COMMIT,
@@ -305,10 +305,11 @@ fn print_stat() {
         s.prime_pos_acc_m,
         shared::rtc_now(),
         s.rtc_checked_unix,
+        s.wififp,
     );
 }
 
-const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | gnss cold|warm|hot | prime show|time <unix_ms>|pos <lat> <lon> [alt_m] [acc_m] | assist begin|data|commit | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
+const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | gnss cold|warm|hot | wifi scan|locate|learn <lat> <lon>|forget | prime show|time <unix_ms>|pos <lat> <lon> [alt_m] [acc_m] | assist begin|data|commit | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
 
 /// A provisioning payload arriving over the console in hex lines.
 static PROV_BUF: embassy_sync::blocking_mutex::Mutex<
@@ -502,6 +503,84 @@ async fn prime(arg: &str) {
     }
 }
 
+/// Ask for a Wi-Fi scan and wait for it (up to 8 s).
+async fn console_scan() -> Option<shared::WifiScan> {
+    let t = shared::now_ms();
+    shared::WIFI_SCAN_REQ.signal(());
+    for _ in 0..80 {
+        Timer::after(Duration::from_millis(100)).await;
+        if let Some(s) = shared::WIFI_SCAN.lock(|s| s.borrow().filter(|x| x.at_ms >= t)) {
+            return Some(s);
+        }
+    }
+    esp_println::println!("wifi: no scan result within 8 s");
+    None
+}
+
+/// `wifi scan` lists what is heard; `wifi locate` matches it against the
+/// fingerprints on the card; `wifi learn <lat> <lon> [acc_m]` records what is
+/// heard as a fingerprint at a position given by hand (a place the GNSS
+/// cannot see, such as indoors at home).
+async fn wifi(arg: &str) {
+    let mut words = arg.split_whitespace();
+    match words.next().unwrap_or("") {
+        "scan" => {
+            let Some(s) = console_scan().await else {
+                return;
+            };
+            esp_println::println!(
+                "wifi: {} heard, {} fixed kept (strongest first):",
+                s.heard,
+                s.n
+            );
+            for ap in &s.aps[..s.n] {
+                esp_println::println!("  {:02x?} {} dBm", ap.bssid, ap.rssi);
+            }
+        }
+        "forget" => STORAGE_CMDS.send(StorageCmd::WifiForget).await,
+        "locate" => {
+            if let Some(s) = console_scan().await {
+                STORAGE_CMDS.send(StorageCmd::WifiLocate(s)).await;
+            }
+        }
+        "learn" => {
+            let fixed = |w: Option<&str>, d| w.and_then(|w| trail_core::prime::parse_fixed(w, d));
+            let lat = fixed(words.next(), 7).and_then(|v| i32::try_from(v).ok());
+            let lon = fixed(words.next(), 7).and_then(|v| i32::try_from(v).ok());
+            let acc_m = words
+                .next()
+                .and_then(|w| w.parse::<u16>().ok())
+                .unwrap_or(20);
+            let (Some(lat_e7), Some(lon_e7)) = (lat, lon) else {
+                esp_println::println!("wifi: learn <lat> <lon> [acc_m]");
+                return;
+            };
+            let Some(s) = console_scan().await else {
+                return;
+            };
+            if s.n == 0 {
+                esp_println::println!("wifi: nothing fixed heard; nothing learned");
+                return;
+            }
+            let unix = if shared::status().rtc_checked_unix > 0 {
+                shared::rtc_now().unwrap_or(0)
+            } else {
+                0
+            };
+            let fp = trail_core::wififp::Fingerprint {
+                unix,
+                lat_e7,
+                lon_e7,
+                acc_m,
+                aps: s.aps,
+                n: s.n as u8,
+            };
+            STORAGE_CMDS.send(StorageCmd::WifiLearn(fp)).await;
+        }
+        _ => esp_println::println!("wifi: scan | locate | learn <lat> <lon> [acc_m] | forget"),
+    }
+}
+
 fn prov(arg: &str) {
     let (sub, rest) = arg
         .split_once(' ')
@@ -585,6 +664,7 @@ async fn run(cmd: &str) {
         "start" => STORAGE_CMDS.send(StorageCmd::Start).await,
         "prov" => prov(arg),
         "prime" => prime(arg).await,
+        "wifi" => wifi(arg).await,
         "gnss" => {
             // Restart the receiver forgetting some of what it knows, to
             // measure time to first fix and test priming. Follow `cold` with

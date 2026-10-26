@@ -149,6 +149,7 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 | `gnssid` | The GPS receiver's identity frames, for AssistNow registration |
 | `prime` | What the GPS will be told at power-on (see below) |
 | `gnss cold` | Make the GPS forget everything, to time a cold start |
+| `wifi scan` · `wifi locate` · `wifi learn <lat> <lon>` · `wifi forget` | Wi-Fi fingerprints (see below) |
 | `flush` · `mark` · `reboot` | |
 
 ```sh
@@ -179,6 +180,15 @@ $T prime --lat 47.6062 --lon -122.3321     # and a position (WGS84; --alt, --acc
 ```
 
 or write `lat=`/`lon=` and `source=manual` into `PRIME.TXT` on the card.
+
+**Wi-Fi fingerprints: where it is from the networks around (built in, offline).** Wherever the
+GPS has a good fix, the logger notes the Wi-Fi access points it hears there (`WIFIFP.CSV`). When
+it powers on with no recent position, it scans and matches what it hears against those notes,
+nearest-neighbour style, for a position good to a few hundred metres, with no internet. Phone
+hotspots are ignored (they move). Teach it a place the GPS cannot see, such as indoors at home,
+with `$T console --cmd "wifi learn 47.6062 -122.3321"`. The method follows
+[wireless_localization2](https://github.com/dmachinewhisperer/wireless_localization2), with the
+GPS doing the survey.
 
 **AssistNow: the satellites' orbits (optional, internet).** u-blox **AssistNow** sells the orbit
 data over the internet; the logger loads it from the card at power-on.
@@ -219,6 +229,7 @@ left recording, every file was pulled back with matching checksums, and the sess
 | Screen, mark button and screen toggle, checked by eye; macOS-formatted cards | |
 | AssistNow: registered, downloaded, uploaded over USB, 109 of 109 messages accepted | |
 | Priming a cold GPS with the time; leaving a GPS that kept its memory alone | |
+| Wi-Fi fingerprints: scan, learn, match, and a Wi-Fi position planned at boot (with a hand-given position) | Learning fingerprints from real GPS fixes |
 
 ## Under the hood
 

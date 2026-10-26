@@ -178,6 +178,39 @@ position is known to ~100 km. Nothing needs the internet:
 - The RTC is checked against GNSS **only with a fix**: a primed receiver reports the RTC's own time
   back as resolved, and checking the RTC against that echo would make it look trustworthy.
 
+### Wi-Fi fingerprints: a position from the access points around
+
+When `PRIME.TXT` has no position, or one too old to be within 1 km, the logger asks the Wi-Fi.
+It is the fingerprinting-and-KNN method of
+[wireless_localization2](https://github.com/dmachinewhisperer/wireless_localization2) (an ESP32
+indoor-localization thesis project), turned around: there a building is surveyed by hand and a
+model runs on a server; here **the GNSS does the survey wherever the logger goes, and the chip
+does the matching, offline** (`trail_core::wififp`, host-tested).
+
+- **Learning.** On a fix good to 30 m, at a place at least 100 m from every fingerprint so far (at
+  most one scan a minute), the logger scans and appends a line to `WIFIFP.CSV` in the card's root:
+  `unix,lat,lon,acc_m,bssid:rssi …` — the 16 strongest access points heard. BSSIDs with the
+  locally-administered bit (phone hotspots, randomised MACs) are left out: they travel, often with
+  the logger itself. `wifi learn <lat> <lon> [acc_m]` records one by hand, for a place the GNSS
+  cannot see, such as indoors at home.
+- **Locating, at boot.** A scan (~1 s) is matched against every fingerprint, streamed from the
+  card: signal distance is the RMS of RSSI differences over every access point heard in either
+  (one not heard counts as -100 dBm); a fingerprint counts only if it shares two access points with
+  the scan. The three nearest are averaged, weighted by closeness; accuracy is 100 m plus their
+  spread, and nothing is given if they disagree by more than 5 km (an access point that moved).
+  Height comes from the old record, or else the barometer, with the accuracy widened to 300 m.
+- **Power.** Not provisioned for a network, the radio is switched on only for each scan and off
+  after it. Provisioned, the station scans while joined.
+- **Console:** `wifi scan` (what is heard), `wifi locate` (the match now), `wifi learn`, `wifi
+  forget` (empties the file). `EVENTS.CSV`: `wififp`, `wififp_learned`, `wifi_locate`.
+
+**Verified on the board, 2026-10-26** (indoors, so with a hand-given position — a deliberately
+false one, since removed): a scan while joined to the network heard 29 access points and kept 14
+(15 mobile ones dropped); `wifi learn` wrote a fingerprint of 10; `wifi locate` matched it to
+±100 m; after a reboot the logger read the fingerprint, scanned, matched and planned a Wi-Fi
+position (±300 m, height from the barometer), and — the receiver having kept its state — sent
+nothing. Learning from real fixes needs open sky.
+
 **Verified on the board, 2026-10-26:** with no `PRIME.TXT` and the RTC 25 days wrong, nothing was
 sent. After `trail prime`, the RTC read true, and a `gnss cold` + reboot gave a receiver reporting
 2021-03-07: priming sent the time, the receiver acknowledged it, and within 7 s reported

@@ -533,14 +533,35 @@ fn prime_write(vm: &Vm, s: &Session, p: &trail_core::prime::Prime) -> Result<(),
     write_root(vm, s, PRIME_FILE, text.as_bytes())
 }
 
-/// At boot: read PRIME.TXT, decide with the RTC what the receiver should be
-/// told, and leave the position frame for the GNSS task, which sends it (and
-/// the time, read off the RTC as it sends) only if the receiver woke cold.
-fn prime_plan(vm: &Vm, s: &Session) {
-    use trail_core::prime::plan;
+/// A position worse than this is worth replacing with a Wi-Fi one: 1 km.
+const WIFI_LOCATE_WORSE_THAN_CM: u32 = 100_000;
+/// How long to wait for a Wi-Fi scan before giving up on it.
+const WIFI_SCAN_WAIT: Duration = Duration::from_secs(8);
+
+/// At boot: read PRIME.TXT and decide with the RTC what the receiver should
+/// be told. Returns the plan and where its position came from.
+fn prime_plan(vm: &Vm, s: &Session) -> (trail_core::prime::Plan, &'static str) {
     let rec = prime_read(vm, s);
-    let rtc = shared::rtc_now();
-    let p = plan(rec.as_ref(), rtc);
+    let p = trail_core::prime::plan(rec.as_ref(), shared::rtc_now());
+    (
+        p,
+        match rec {
+            Some(r) => r.source.as_str(),
+            None => "no PRIME.TXT",
+        },
+    )
+}
+
+/// Whether a plan's position is missing or poor enough that a Wi-Fi
+/// position would be better.
+fn wants_wifi(p: &trail_core::prime::Plan) -> bool {
+    p.pos.is_none_or(|q| q.acc_cm > WIFI_LOCATE_WORSE_THAN_CM)
+}
+
+/// Leave the plan for the GNSS task: the position frame now, the time as an
+/// accuracy (the GNSS task reads the RTC as it sends), and only if the
+/// receiver woke cold.
+fn prime_commit(p: trail_core::prime::Plan, source: &str) {
     let mut frames: heapless::Vec<shared::AssistFrame, 2> = heapless::Vec::new();
     if let Some(pos) = p.pos {
         let mut raw = [0u8; 40];
@@ -569,15 +590,104 @@ fn prime_plan(vm: &Vm, s: &Session) {
         "prime_plan",
         format_args!(
             "{} rtc={:?} time_acc_ms={:?} pos_acc_m={:?}",
-            match rec {
-                Some(r) => r.source.as_str(),
-                None => "no PRIME.TXT",
-            },
-            rtc,
+            source,
+            shared::rtc_now(),
             p.time.map(|t| t.acc_ms),
             p.pos.map(|q| q.acc_cm / 100)
         ),
     );
+}
+
+const WIFIFP_FILE: &str = "WIFIFP.CSV";
+/// Fingerprint positions held in memory to keep new ones 100 m apart. A
+/// fingerprint is ~200 bytes on the card; 2048 is ~400 KB.
+const WIFIFP_MAX: usize = 2048;
+/// Learn only from fixes this good: 30 m.
+const WIFIFP_LEARN_ACC_MM: u32 = 30_000;
+/// At most one learning scan this often.
+const WIFIFP_LEARN_EVERY: Duration = Duration::from_secs(60);
+
+/// Call `f` with each line of a root file, read in small pieces.
+fn for_each_line(vm: &Vm, s: &Session, name: &str, mut f: impl FnMut(&str)) -> bool {
+    let Ok(file) = vm.open_file_in_dir(s.root, name, Mode::ReadOnly) else {
+        return false;
+    };
+    let mut line: String<400> = String::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = match vm.read(file, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                f(line.as_str());
+                line.clear();
+            } else if line.push(b as char).is_err() {
+                line.clear(); // an over-long line: not ours, skip it
+            }
+        }
+    }
+    if !line.is_empty() {
+        f(line.as_str());
+    }
+    let _ = vm.close_file(file);
+    true
+}
+
+/// The positions of every fingerprint on the card, for spacing new ones.
+fn wififp_index(vm: &Vm, s: &Session) -> Vec<(i32, i32)> {
+    let mut idx = Vec::new();
+    for_each_line(vm, s, WIFIFP_FILE, |l| {
+        if let Some(fp) = trail_core::wififp::Fingerprint::parse(l)
+            && idx.len() < WIFIFP_MAX
+        {
+            idx.push((fp.lat_e7, fp.lon_e7));
+        }
+    });
+    idx
+}
+
+/// Match a scan against every fingerprint on the card.
+fn wififp_locate(
+    vm: &Vm,
+    s: &Session,
+    scan: &shared::WifiScan,
+) -> Option<trail_core::wififp::Estimate> {
+    let mut knn = trail_core::wififp::Knn::<3>::default();
+    let aps = &scan.aps[..scan.n];
+    for_each_line(vm, s, WIFIFP_FILE, |l| {
+        if let Some(fp) = trail_core::wififp::Fingerprint::parse(l) {
+            knn.push(aps, &fp);
+        }
+    });
+    knn.estimate()
+}
+
+/// Whether a good fix here would make a new fingerprint: nothing within
+/// 100 m yet.
+fn wififp_is_new_place(idx: &[(i32, i32)], lat_e7: i32, lon_e7: i32) -> bool {
+    idx.len() < WIFIFP_MAX
+        && idx.iter().all(|&(la, lo)| {
+            trail_core::wififp::distance_m(la, lo, lat_e7, lon_e7)
+                >= trail_core::wififp::LEARN_SPACING_M
+        })
+}
+
+fn wififp_append(vm: &Vm, s: &Session, fp: &trail_core::wififp::Fingerprint) -> Result<(), ()> {
+    let mut line: String<400> = String::new();
+    writeln!(line, "{}", fp).map_err(|_| ())?;
+    let f = vm
+        .open_file_in_dir(s.root, WIFIFP_FILE, Mode::ReadWriteCreateOrAppend)
+        .map_err(|_| ())?;
+    let r = vm.write(f, line.as_bytes()).map_err(|_| ());
+    let c = vm.close_file(f).map_err(|_| ());
+    r.and(c)
+}
+
+/// The latest scan, if it finished after `since_ms`.
+fn scan_since(since_ms: u64) -> Option<shared::WifiScan> {
+    shared::WIFI_SCAN.lock(|s| s.borrow().filter(|x| x.at_ms >= since_ms))
 }
 
 /// While the fix is good: record it in PRIME.TXT for the next power-on.
@@ -826,6 +936,12 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
     let mut bytes: u64 = 0;
     let mut prime_planned = false;
     let mut prime_saved: Option<Instant> = None;
+    // Wi-Fi fingerprints: their positions (read once), a boot-time locate
+    // waiting for its scan, and a learning scan waiting for its result.
+    let mut fp_index: Option<Vec<(i32, i32)>> = None;
+    let mut locating: Option<(trail_core::prime::Plan, &'static str, u64)> = None;
+    let mut learning: Option<(i32, i32, u16, i64, u64)> = None;
+    let mut last_learn: Option<Instant> = None;
 
     loop {
         // (Re)mount the card and open a session.
@@ -937,10 +1053,117 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
             // Priming: plan once per boot when the card and the RTC are
             // read; record a good fix for the next power-on.
             if let Some(s) = session.as_ref() {
+                let idx = fp_index.get_or_insert_with(|| {
+                    let i = wififp_index(&vm, s);
+                    event(
+                        "wififp",
+                        format_args!("{} fingerprints in {}", i.len(), WIFIFP_FILE),
+                    );
+                    with_status(|st| st.wififp = i.len() as u32);
+                    i
+                });
                 if !prime_planned && shared::status().rtc_read_done {
-                    prime_plan(&vm, s);
                     prime_planned = true;
+                    let (p, src) = prime_plan(&vm, s);
+                    // No position worth sending: ask the Wi-Fi around us.
+                    if wants_wifi(&p) && !idx.is_empty() {
+                        let t = shared::now_ms();
+                        shared::WIFI_SCAN_REQ.signal(());
+                        locating = Some((p, src, t));
+                    } else {
+                        prime_commit(p, src);
+                    }
                 }
+                if let Some((mut p, mut src, t)) = locating {
+                    if let Some(scan) = scan_since(t) {
+                        locating = None;
+                        match wififp_locate(&vm, s, &scan) {
+                            Some(e) => {
+                                // Height: the old record's, else the
+                                // barometer's (geoid unknown, so a wider
+                                // accuracy).
+                                let (alt_cm, floor_m) = match p.pos {
+                                    Some(q) => (q.alt_cm, 0.0),
+                                    None => ((shared::status().elevation_m * 100.0) as i32, 300.0),
+                                };
+                                let acc_m = e.acc_m.max(floor_m);
+                                event(
+                                    "wifi_locate",
+                                    format_args!(
+                                        "{} neighbours, best {:.0} dB, {} of {} heard: acc {:.0} m",
+                                        e.k, e.best_db, scan.n, scan.heard, acc_m
+                                    ),
+                                );
+                                p.pos = Some(trail_core::prime::PosAid {
+                                    lat_e7: e.lat_e7,
+                                    lon_e7: e.lon_e7,
+                                    alt_cm,
+                                    acc_cm: (acc_m * 100.0) as u32,
+                                });
+                                src = "wifi";
+                            }
+                            None => event(
+                                "wifi_locate",
+                                format_args!("no match ({} fixed of {} heard)", scan.n, scan.heard),
+                            ),
+                        }
+                        prime_commit(p, src);
+                    } else if shared::now_ms() - t > WIFI_SCAN_WAIT.as_millis() {
+                        locating = None;
+                        event(
+                            "wifi_locate",
+                            format_args!("no scan within {} s", WIFI_SCAN_WAIT.as_secs()),
+                        );
+                        prime_commit(p, src);
+                    }
+                }
+
+                // Learning: a good fix at a new place, and the Wi-Fi heard there.
+                let st = shared::status();
+                if learning.is_none()
+                    && st.fix_ok
+                    && st.h_acc_mm <= WIFIFP_LEARN_ACC_MM
+                    && last_learn.is_none_or(|t: Instant| t.elapsed() >= WIFIFP_LEARN_EVERY)
+                    && let Some(utc) = st.utc
+                    && wififp_is_new_place(idx, st.lat_e7, st.lon_e7)
+                {
+                    last_learn = Some(Instant::now());
+                    let t = shared::now_ms();
+                    shared::WIFI_SCAN_REQ.signal(());
+                    learning = Some((
+                        st.lat_e7,
+                        st.lon_e7,
+                        (st.h_acc_mm / 1000) as u16,
+                        trail_core::pcf8563::unix_seconds(&utc),
+                        t,
+                    ));
+                }
+                if let Some((lat_e7, lon_e7, acc_m, unix, t)) = learning {
+                    if let Some(scan) = scan_since(t) {
+                        learning = None;
+                        if scan.n > 0 {
+                            let fp = trail_core::wififp::Fingerprint {
+                                unix,
+                                lat_e7,
+                                lon_e7,
+                                acc_m,
+                                aps: scan.aps,
+                                n: scan.n as u8,
+                            };
+                            if wififp_append(&vm, s, &fp).is_ok() {
+                                idx.push((lat_e7, lon_e7));
+                                with_status(|st| st.wififp = idx.len() as u32);
+                                event(
+                                    "wififp_learned",
+                                    format_args!("#{}: {} access points", idx.len(), scan.n),
+                                );
+                            }
+                        }
+                    } else if shared::now_ms() - t > WIFI_SCAN_WAIT.as_millis() {
+                        learning = None;
+                    }
+                }
+
                 if prime_saved.is_none_or(|t| t.elapsed() >= PRIME_SAVE_EVERY)
                     && prime_save_fix(&vm, s)
                 {
@@ -1012,6 +1235,67 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                             break; // reopen through the mount path
                         }
                     }
+                    StorageCmd::WifiLocate(scan) => match session.as_ref() {
+                        Some(s) => match wififp_locate(&vm, s, &scan) {
+                            Some(e) => esp_println::println!(
+                                "wifi: at {:.7},{:.7} ±{:.0} m ({} neighbours, best {:.0} dB; {} of {} heard)",
+                                e.lat_e7 as f64 / 1e7,
+                                e.lon_e7 as f64 / 1e7,
+                                e.acc_m,
+                                e.k,
+                                e.best_db,
+                                scan.n,
+                                scan.heard
+                            ),
+                            None => esp_println::println!(
+                                "wifi: no match among {} fingerprints ({} of {} heard)",
+                                fp_index.as_ref().map_or(0, |i| i.len()),
+                                scan.n,
+                                scan.heard
+                            ),
+                        },
+                        None => esp_println::println!("wifi: card not mounted"),
+                    },
+                    StorageCmd::WifiForget => match session.as_ref() {
+                        Some(s) => match write_root(&vm, s, WIFIFP_FILE, &[]) {
+                            Ok(()) => {
+                                if let Some(i) = fp_index.as_mut() {
+                                    i.clear();
+                                }
+                                with_status(|st| st.wififp = 0);
+                                event("wififp", format_args!("forgotten from the console"));
+                                esp_println::println!("wifi: fingerprints forgotten");
+                            }
+                            Err(()) => {
+                                esp_println::println!("wifi: FAILED to empty {}", WIFIFP_FILE)
+                            }
+                        },
+                        None => esp_println::println!("wifi: card not mounted"),
+                    },
+                    StorageCmd::WifiLearn(fp) => match session.as_ref() {
+                        Some(s) => match wififp_append(&vm, s, &fp) {
+                            Ok(()) => {
+                                let n = fp_index.as_mut().map_or(0, |i| {
+                                    i.push((fp.lat_e7, fp.lon_e7));
+                                    i.len()
+                                });
+                                with_status(|st| st.wififp = n as u32);
+                                event(
+                                    "wififp_learned",
+                                    format_args!("#{} by hand: {} access points", n, fp.n),
+                                );
+                                esp_println::println!(
+                                    "wifi: learned #{} with {} access points",
+                                    n,
+                                    fp.n
+                                );
+                            }
+                            Err(()) => {
+                                esp_println::println!("wifi: FAILED to write {}", WIFIFP_FILE)
+                            }
+                        },
+                        None => esp_println::println!("wifi: card not mounted"),
+                    },
                     StorageCmd::PrimeShow => prime_show(&vm, session.as_ref()),
                     StorageCmd::PrimeHost { unix, pos } => match session.as_ref() {
                         Some(s) => prime_host(&vm, s, unix, pos),

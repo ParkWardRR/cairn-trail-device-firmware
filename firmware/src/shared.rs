@@ -185,6 +185,8 @@ pub struct Status {
     /// What was planned: time accuracy (ms) and position accuracy (m); 0 = none.
     pub prime_time_acc_ms: u32,
     pub prime_pos_acc_m: u32,
+    /// Wi-Fi fingerprints on the card (WIFIFP.CSV).
+    pub wififp: u32,
 }
 
 /// Priming the receiver at power-on with the time and the last position
@@ -261,6 +263,7 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         prime: PrimeState::Pending,
         prime_time_acc_ms: 0,
         prime_pos_acc_m: 0,
+        wififp: 0,
     }));
 
 pub fn with_status<R>(f: impl FnOnce(&mut Status) -> R) -> R {
@@ -296,6 +299,12 @@ pub enum StorageCmd {
     },
     /// Replace ASSIST.UBX with these bytes and feed it to the receiver now.
     PutAssist(alloc::vec::Vec<u8>),
+    /// Match a scan against the fingerprints on the card and print the result.
+    WifiLocate(WifiScan),
+    /// Record a fingerprint given by hand (`wifi learn`).
+    WifiLearn(trail_core::wififp::Fingerprint),
+    /// Empty WIFIFP.CSV.
+    WifiForget,
 }
 
 pub static STORAGE_CMDS: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
@@ -328,6 +337,23 @@ pub static GNSS_CMD: Channel<CriticalSectionRawMutex, AssistFrame, 2> = Channel:
 /// and before any AssistNow data.
 pub static PRIME_FRAMES: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<AssistFrame, 2>>> =
     Mutex::new(RefCell::new(heapless::Vec::new()));
+
+/// A Wi-Fi scan: the strongest fixed access points heard, strongest first
+/// (`trail_core::wififp::select`), and the uptime it finished at.
+#[derive(Clone, Copy)]
+pub struct WifiScan {
+    pub at_ms: u64,
+    pub aps: [trail_core::wififp::Ap; trail_core::wififp::MAX_APS],
+    pub n: usize,
+    /// Access points heard in all, mobile ones included.
+    pub heard: usize,
+}
+
+/// Ask the network task for a Wi-Fi scan; the result lands in `WIFI_SCAN`.
+pub static WIFI_SCAN_REQ: embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> =
+    embassy_sync::signal::Signal::new();
+pub static WIFI_SCAN: Mutex<CriticalSectionRawMutex, RefCell<Option<WifiScan>>> =
+    Mutex::new(RefCell::new(None));
 
 /// Unix seconds to set the RTC to (from the computer, over the console).
 pub static RTC_SET: embassy_sync::signal::Signal<CriticalSectionRawMutex, i64> =
