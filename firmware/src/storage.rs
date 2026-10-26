@@ -556,9 +556,10 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
         }
     };
     with_status(|s| s.imu_ok = imu_ok);
-    // The first samples after enabling are garbage while the filters settle
-    // (seen up to 3.7 g at rest): record from 200 ms after enabling.
-    let imu_valid_from = Instant::now() + Duration::from_millis(200);
+    // The first samples after enabling are garbage while the low-pass filters
+    // settle (about 1.7 Hz at this rate; seen up to 3.7 g at rest for ~0.5 s):
+    // record from one second after enabling.
+    let imu_valid_from = Instant::now() + Duration::from_millis(1000);
 
     let mut bufs: [Vec<u8>; STREAMS] =
         core::array::from_fn(|_| Vec::with_capacity(WRITE_THRESHOLD + 512));
