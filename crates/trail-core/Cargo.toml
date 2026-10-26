@@ -1,0 +1,12 @@
+[package]
+name = "trail-core"
+version = "0.1.0"
+edition = "2021"
+description = "Host-testable logic for the Cairn trail device: UBX, BME280, elevation, battery, RTC"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+libm = "0.2.16"
+
+[dev-dependencies]

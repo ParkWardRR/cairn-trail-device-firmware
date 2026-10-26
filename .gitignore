@@ -11,3 +11,10 @@ include/secrets.h
 # Build output
 .pio/
 /build/
+
+# Rust build output and local CI artifacts
+firmware/target/
+crates/*/target/
+dist/
+# Files pulled off the card for verification
+pulled/

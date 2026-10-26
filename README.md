@@ -21,16 +21,21 @@
   <img src="https://img.shields.io/badge/target-ESP32--S3_·_LILYGO_T--Beam_Supreme-2E86C1?style=flat-square" alt="ESP32-S3, LILYGO T-Beam Supreme">
   <img src="https://img.shields.io/badge/firmware-Rust_·_esp--hal_·_Embassy-2E86C1?style=flat-square" alt="Rust, esp-hal, Embassy">
   <img src="https://img.shields.io/badge/contracts-v0.8.0-2E86C1?style=flat-square" alt="contracts-v0.8.0">
-  <img src="https://img.shields.io/badge/status-designed,_nothing_built-E67E22?style=flat-square" alt="Designed, nothing built">
+  <img src="https://img.shields.io/badge/firmware-v0.1.0_capture_logger-27AE60?style=flat-square" alt="v0.1.0 capture logger">
 </p>
 
 ---
 
-> **Status, 2026-10-25: Designed. Nothing is built and nothing has run.** This repository holds
-> the plan for the device, its hardware notes and its contract pin. There is no firmware yet, and
-> the board has not been powered on for Cairn. Everything below that describes behaviour is the
-> design, in the project's own words for it: *Designed* means a plan exists, not that anything
-> works.
+> **Status, 2026-10-25: v0.1.0, a capture logger, runs on the owner's unit.** It records GNSS
+> (UBX-NAV-PVT and per-satellite NAV-SAT), the IMU at 50 Hz, the barometer with fused elevation and
+> climb at 4 Hz, the magnetometer at 10 Hz, power every 5 s, the GNSS time pulse and every event,
+> each to its own CSV file in a new session directory on the SD card, with the LoRa radio held
+> off. **Proven on the board** (indoors, on USB power): every stream at its rate, files pulled back
+> over USB with matching CRC-32s, and the checks in `scripts/verify.py` passing — see
+> [docs/firmware.md](docs/firmware.md). **Not yet proven:** a GNSS fix and the PPS line (no sky
+> indoors), the display and BOOT button by eye, and anything on a battery. The rest of this README —
+> sealed `format/v3` bundles, activities, offload — is still *Designed*: the CSV logger is the
+> bring-up tool that T2's sealed record replaces.
 
 This repository is one of seven that make up [Cairn](https://github.com/ParkWardRR/cairn-driving-log-selfhosted),
 a self-hosted driving log that is growing a second device. The car has a dongle on its OBD-II
@@ -51,6 +56,7 @@ The rule is the dongle's rule: the carrier moves ciphertext it cannot read, and 
 its card only on a receipt it has verified itself.
 
 **Contents:**
+[v0.1 capture logger](docs/firmware.md) ·
 [What it is](#what-the-trail-device-is-and-is-not) ·
 [Hardware](#hardware) ·
 [How it fits Cairn](#how-it-fits-cairn) ·
@@ -264,9 +270,10 @@ reserved and deferred.
 The schedule lives in the one Cairn roadmap, as phases **T1–T8**:
 [ROADMAP.md — the trail device](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
 In short: bring-up, then the capture core on the S3, then enrolment and the first hike on the
-dashboard, then activities, battery life, the ways home, and chip hardening (the LoRa phase is deferred). The next step is
-**T1, bring-up**: power the board, enable the PMU rails, and read every part off the real unit
-into [docs/hardware.md](docs/hardware.md).
+dashboard, then activities, battery life, the ways home, and chip hardening (the LoRa phase is
+deferred). **T1, bring-up, is done but for a fix under open sky and the meter readings**: every
+part has been read off the real unit ([docs/hardware.md](docs/hardware.md)), and v0.1.0 logs all of
+it. Next is T2: the sealed `format/v3` record in place of the CSV files.
 
 ## Repository layout
 
@@ -275,13 +282,16 @@ into [docs/hardware.md](docs/hardware.md).
 | [`docs/hardware.md`](docs/hardware.md) | The board: parts, the AXP2101 rail map from the schematics, pins, chip identities, the PMU registers the driver needs, what shapes the firmware, and what has been read off the real unit |
 | [`docs/prior-art.md`](docs/prior-art.md) | What eight other firmware projects for this board taught — power, the M10, time, storage, elevation, UX, and their bugs — with each source's licence and what may be taken from it |
 | [`docs/bringup.md`](docs/bringup.md) | The staged bring-up procedure, starting with a full backup of the stock image |
+| [`docs/firmware.md`](docs/firmware.md) | v0.1: building, flashing, the console, the files on the card and their columns, how it was verified, and what is not yet proven |
+| [`firmware/`](firmware/) | The firmware: Rust on `esp-hal` + Embassy for the ESP32-S3 (`espup` toolchain). `verbose` feature for the debug build |
+| [`crates/trail-core/`](crates/trail-core/) | Host-tested logic with no hardware in it: the UBX parser and builders, BME280 compensation, elevation fusion and climb, battery curve, RTC, GPT reading |
+| [`scripts/`](scripts/) | Local CI/CD: `ci.sh` (format, clippy, tests, both builds, merged images), `flash.sh`, `release.sh`; `console.py` (capture, commands, pull files with CRC check) and `verify.py` (check a pulled session) |
+| [`evidence/`](evidence/) | Logs from the real board, dated |
 | [`contracts.lock`](contracts.lock) | The contract release this repository is built against |
 | [`LICENSE`](LICENSE) | Blue Oak Model License 1.0.0 |
 
-The firmware tree arrives with T1 and T2: a Cargo workspace with the firmware binary (Xtensa,
-`esp-hal` + Embassy), the board's drivers, the host-testable logic crates, a `rust-toolchain.toml`
-naming the `esp` channel, `.cargo/config.toml` for `espflash`, and `cairn-format` taken by git
-revision from the dongle repository.
+`cairn-format`, the shared `format/v3` crate from the dongle repository's emulator, arrives with
+T2.
 
 ## Contributing
 

@@ -5,8 +5,8 @@ What is known about the board, and how it is known. Three grades of source, kept
 - **Schematic** — LilyGO's published schematics: the T-Beam-S3-Core module (V3.0, dated
   2026-05-13) and the two carrier boards it plugs into, T-Beam-S3-Supreme V3.0 and V3.1.
 - **Vendor** — LilyGO's hardware page and its MIT-licensed board-support code.
-- **The unit** — read off the board on the owner's desk. Until bring-up
-  ([bringup.md](bringup.md)) runs, only what its stock firmware reported is in this grade.
+- **The unit** — read off the board on the owner's desk, by esptool and by firmware v0.1.0
+  ([Read off the unit](#read-off-the-unit)).
 
 Where two sources disagree, both are written down and the schematic wins until the board
 settles it. What the other firmware for this board taught is in [prior-art.md](prior-art.md).
@@ -166,24 +166,31 @@ From XPowersLib (MIT), `src/REG/AXP2101Constants.h` and `src/XPowersAXP2101.tpp`
 
 ## Read off the unit
 
-Filled in by bring-up. Rows already known are from the stock firmware, above.
+Read on 2026-10-25 by esptool and by firmware v0.1.0 (logs in [`evidence/`](../evidence/)).
 
 | Fact | Value | How it was read | Date |
 |---|---|---|---|
-| MAC, USB serial | `48:ca:43:5b:ed:60`, `48CA435BED60` | stock firmware, USB descriptor | 2026-10-25 |
+| MAC, USB serial | `48:ca:43:5b:ed:60`, `48CA435BED60` | stock firmware, esptool | 2026-10-25 |
 | Stock firmware | Meshtastic 2.7.10.94d4bdf | `meshtastic --info` | 2026-10-25 |
-| Full flash backup | — | `esptool read-flash 0 ALL` | — |
-| Carrier revision | — | silkscreen, magnetometer address | — |
-| Chip revision, flash and PSRAM | — | `esptool chip-id`, `flash-id`, boot log | — |
-| GNSS module and firmware | — | UBX-MON-VER | — |
-| LoRa module | — (SX1262 inferred) | module label | — |
-| Magnetometer variant | — | I²C probe and chip ID | — |
-| OLED and BME280 addresses | — | I²C probe | — |
-| AXP2101 rail states as shipped | — | registers `0x80`, `0x90`–`0x97` | — |
-| What feeds the IMU and the RTC | — | toggle ALDO1/ALDO2, probe | — |
-| Power-off hold time | — | register `0x27` | — |
-| RTC voltage-low flag on first power | — | PCF8563 | — |
-| 18650 fitted, capacity | — (probably none) | PMU status `0x00` bit 3, label | — |
+| Full flash backup | 8 MB, SHA-256 `1a1310d35537e3584b233a9545ccd431340af171b496e3f900e3ab5748f05c36`, in `~/cairn-backups` | `esptool read-flash 0 ALL` | 2026-10-25 |
+| Chip | ESP32-S3 (QFN56) **revision v0.2**, 40 MHz crystal | esptool | 2026-10-25 |
+| Flash | 8 MB embedded, GigaDevice (`c8`/`4017`), quad | esptool, eFuse | 2026-10-25 |
+| PSRAM | **None in the package** (eFuse PSRAM capacity 0); any external PSRAM is unconfirmed | eFuse summary | 2026-10-25 |
+| eFuses | No secure boot, no flash encryption, JTAG enabled | `espefuse summary` (read only) | 2026-10-25 |
+| Carrier revision | **V3.1** (QMC6309 at `0x7C`) | I²C probe and chip ID | 2026-10-25 |
+| GNSS module and firmware | **MAX-M10S**, `ROM SPG 5.10 (7b202e)`, hardware `000A0000`, PROTVER 34.10; GPS, GLONASS, Galileo, BeiDou, SBAS, QZSS | UBX-MON-VER | 2026-10-25 |
+| LoRa module | — (SX1262 inferred; never powered by Cairn) | — | — |
+| Magnetometer | QMC6309, chip ID `0x90` | I²C | 2026-10-25 |
+| OLED, BME280 | `0x3C`, `0x77` | I²C probe | 2026-10-25 |
+| IMU | QMI8658, WHO_AM_I `0x05`, revision `0x7C`; `CTRL1` powers up `0x20` | SPI | 2026-10-25 |
+| AXP2101 | IC type `0x4A` | I²C | 2026-10-25 |
+| PMU rails at power-up | `dcdc=0x19` (DC1, DC4, DC5), `ldo=0x17` (**ALDO3 — the radio — on**, ALDO1, ALDO2, BLDO1; ALDO4 off); ALDO1 and BLDO1 at 1.8 V, the rest 3.3 V | registers `0x80`, `0x90`, `0x92`–`0x97` | 2026-10-25 |
+| Rails as Cairn sets them | `ldo=0x1b`: ALDO1, ALDO2, ALDO4, BLDO1 at 3.3 V; **ALDO3 off** | same | 2026-10-25 |
+| Power key timing | `0x14`: long-press IRQ 1.5 s, **power-off hold 6 s**, power-on 128 ms | register `0x27` | 2026-10-25 |
+| What feeds the IMU and the RTC | Not separately tested; the IMU kept its state across every ESP32 reset and cleared only on a full power-off, consistent with the schematics' always-on 3V3 | behaviour | 2026-10-25 |
+| RTC on first read | `2026-09-30T23:41:48`, voltage-low clear: **about 25 days wrong** (set by Meshtastic) | PCF8563 | 2026-10-25 |
+| 18650 fitted | **No** (PMU battery-present clear, VBAT 0) | PMU status | 2026-10-25 |
+| SD card used | 62.6 GB SDXC, reformatted FAT32 under a GUID partition map | firmware | 2026-10-25 |
 | Board current, radio held off | — | meter on the cell | — |
 | Board current, deep sleep | — (vendor: ~1.45 mA) | meter on the cell | — |
 
