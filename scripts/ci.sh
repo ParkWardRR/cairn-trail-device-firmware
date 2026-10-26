@@ -49,7 +49,7 @@ for flavour in verbose release; do
     (cd firmware && cargo build --release)
   fi
   cp "$ELF" "dist/${NAME}-${flavour}.elf"
-  espflash save-image --chip esp32s3 --merge --flash-size 8mb \
+  espflash save-image --chip esp32s3 --merge --skip-padding --flash-size 8mb \
     "$ELF" "dist/${NAME}-${flavour}.bin" >/dev/null
 done
 
