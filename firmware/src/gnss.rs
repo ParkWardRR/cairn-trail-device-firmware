@@ -139,6 +139,7 @@ async fn configure(uart: &mut GnssUart, parser: &mut Parser) -> bool {
         (key::RATE_MEAS, 1000),
         (key::RATE_NAV, 1),
         (key::PM_OPERATEMODE, 0), // full power: measure before saving power
+        (key::NAVSPG_ACKAIDING, 1), // acknowledge AssistNow messages
     ];
     let n = ubx::valset(ubx::LAYER_RAM, &items, &mut out).unwrap();
     send(uart, &out[..n]).await;
@@ -168,6 +169,24 @@ async fn configure(uart: &mut GnssUart, parser: &mut Parser) -> bool {
         set_baud(uart, RUN_BAUD);
     }
     cfg_ack.is_some()
+}
+
+/// Keep a whole identity frame (rebuilt from its payload) for the console's
+/// `gnssid` command and AssistNow registration.
+fn store_identity(mon_ver: bool, class: u8, id: u8, payload: &[u8]) {
+    let mut out = [0u8; 320];
+    if let Some(n) = ubx::frame(class, id, payload, &mut out) {
+        crate::shared::GNSS_IDENTITY.lock(|g| {
+            let mut g = g.borrow_mut();
+            if mon_ver {
+                g.mon_ver.clear();
+                let _ = g.mon_ver.extend_from_slice(&out[..n]);
+            } else {
+                g.uniqid.clear();
+                let _ = g.uniqid.extend_from_slice(&out[..n.min(48)]);
+            }
+        });
+    }
 }
 
 fn handle_pvt(p: &[u8]) {
@@ -341,6 +360,7 @@ pub async fn gnss_task(
                         && f.id == ubx::MON_VER
                     {
                         let p = parser.payload(&f);
+                        store_identity(true, ubx::CLASS_MON, ubx::MON_VER, p);
                         if let Some((sw, hw)) = ubx::mon_ver(p) {
                             let mut ext: String<160> = String::new();
                             for i in 0..6 {
@@ -363,11 +383,53 @@ pub async fn gnss_task(
             }
         }
 
+        // SEC-UNIQID: the chip's unique ID, which u-blox AssistNow registration
+        // binds its credential to.
+        let n = ubx::poll(ubx::CLASS_SEC, ubx::SEC_UNIQID, &mut poll).unwrap();
+        send(&mut uart, &poll[..n]).await;
+        match wait_for(
+            &mut uart,
+            &mut parser,
+            ubx::CLASS_SEC,
+            ubx::SEC_UNIQID,
+            Duration::from_millis(1500),
+        )
+        .await
+        {
+            Some((len, keep)) => {
+                let p = &keep[..len.min(64)];
+                store_identity(false, ubx::CLASS_SEC, ubx::SEC_UNIQID, p);
+                event("gnss_uniqid", format_args!("{:02x?}", p));
+            }
+            None => event("gnss_uniqid", format_args!("no answer")),
+        }
+
         configure(&mut uart, &mut parser).await;
 
         // Run: decode everything; reconfigure if PVT stops for 10 s.
         let mut last_pvt = Instant::now();
         loop {
+            // AssistNow data from the card, one frame at a time, paced so the
+            // receiver's input buffer keeps up (each is acknowledged by MGA-ACK).
+            for _ in 0..16 {
+                let Ok(frame) = crate::shared::ASSIST.try_receive() else {
+                    break;
+                };
+                if frame.is_empty() {
+                    let s = crate::shared::status();
+                    event(
+                        "assist_sent",
+                        format_args!(
+                            "{} frames sent; accepted so far {}, not used {}",
+                            s.assist_sent, s.assist_accepted, s.assist_rejected
+                        ),
+                    );
+                    break;
+                }
+                send(&mut uart, &frame).await;
+                with_status(|s| s.assist_sent += 1);
+                Timer::after(Duration::from_millis(8)).await;
+            }
             match select(
                 uart.read_async(&mut buf),
                 Timer::after(Duration::from_secs(1)),
@@ -384,6 +446,17 @@ pub async fn gnss_task(
                                     handle_pvt(p);
                                 }
                                 (ubx::CLASS_NAV, ubx::NAV_SAT) => handle_sat(p),
+                                (ubx::CLASS_MGA, ubx::MGA_ACK) => {
+                                    if let Some((ok, _)) = ubx::mga_ack(p) {
+                                        with_status(|s| {
+                                            if ok {
+                                                s.assist_accepted += 1
+                                            } else {
+                                                s.assist_rejected += 1
+                                            }
+                                        });
+                                    }
+                                }
                                 (ubx::CLASS_ACK, ubx::ACK_NAK) => {
                                     event("gnss_nak", format_args!("{:02x?}", ubx::ack_target(p)))
                                 }

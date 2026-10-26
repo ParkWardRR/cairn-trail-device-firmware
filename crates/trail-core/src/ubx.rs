@@ -11,6 +11,8 @@ pub const CLASS_NAV: u8 = 0x01;
 pub const CLASS_ACK: u8 = 0x05;
 pub const CLASS_CFG: u8 = 0x06;
 pub const CLASS_MON: u8 = 0x0A;
+pub const CLASS_MGA: u8 = 0x13;
+pub const CLASS_SEC: u8 = 0x27;
 
 pub const NAV_PVT: u8 = 0x07;
 pub const NAV_SAT: u8 = 0x35;
@@ -19,6 +21,8 @@ pub const ACK_ACK: u8 = 0x01;
 pub const CFG_CFG: u8 = 0x09;
 pub const CFG_VALSET: u8 = 0x8A;
 pub const MON_VER: u8 = 0x04;
+pub const MGA_ACK: u8 = 0x60;
+pub const SEC_UNIQID: u8 = 0x03;
 
 /// Largest payload the parser keeps. NAV-SAT is 8 + 12 bytes per satellite;
 /// 1024 bytes holds 84 satellites, more than an M10 tracks.
@@ -38,6 +42,8 @@ pub mod key {
     pub const RATE_MEAS: u32 = 0x3021_0001;
     pub const RATE_NAV: u32 = 0x3021_0002;
     pub const PM_OPERATEMODE: u32 = 0x20D0_0001;
+    /// Acknowledge each AssistNow (UBX-MGA) message with UBX-MGA-ACK.
+    pub const NAVSPG_ACKAIDING: u32 = 0x1011_0025;
 }
 
 /// `CFG-NAVSPG-DYNMODEL` values.
@@ -474,6 +480,15 @@ pub fn mon_ver_ext(p: &[u8], i: usize) -> Option<&str> {
     Some(ascii_field(&p[o..o + 30]))
 }
 
+/// UBX-MGA-ACK: (accepted, message id it refers to). Type 1 means the
+/// receiver accepted the assistance message; 0 means it was not used.
+pub fn mga_ack(p: &[u8]) -> Option<(bool, u8)> {
+    if p.len() < 4 {
+        return None;
+    }
+    Some((p[0] == 1, p[3]))
+}
+
 /// The class and id an ACK or NAK refers to.
 pub fn ack_target(p: &[u8]) -> Option<(u8, u8)> {
     if p.len() < 2 {
@@ -653,6 +668,13 @@ mod tests {
         assert_eq!(s.quality(), 7);
         assert_eq!(nav_sat(&p, 1).unwrap().gnss_id, 2);
         assert!(nav_sat(&p, 2).is_none());
+    }
+
+    #[test]
+    fn mga_ack_decodes() {
+        assert_eq!(mga_ack(&[1, 0, 0, 0x20, 0, 0, 0, 0]), Some((true, 0x20)));
+        assert_eq!(mga_ack(&[0, 0, 4, 0x06]), Some((false, 0x06)));
+        assert_eq!(mga_ack(&[1]), None);
     }
 
     #[test]

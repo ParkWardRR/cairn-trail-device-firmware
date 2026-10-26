@@ -213,7 +213,8 @@ fn print_stat() {
          gnss seen={} model={} fix_ok={} type={} sv={}/{} lat={:.6} lon={:.6} hmsl={:.1}m h_acc={:.1}m v_acc={:.1}m pvt={} ubx_crc_err={}\n\
          baro ok={} p={:.1}Pa t={:.2}C rh={:.1}% elev={:.1}m gain={:.1}m loss={:.1}m anchored={}\n\
          imu ok={} accel_mg={:?}  mag ok={} heading={:.0}\n\
-         power battery={} vbat={}mV vbus={}mV charging={} soc={}%  marks={} display={}",
+         power battery={} vbat={}mV vbus={}mV charging={} soc={}%  marks={} display={}\n\
+         assistnow queued={} sent={} accepted={} not_used={}",
         shared::VERSION,
         shared::FLAVOUR,
         shared::COMMIT,
@@ -258,10 +259,14 @@ fn print_stat() {
         s.soc_pct,
         s.marks,
         s.display_on,
+        s.assist_queued,
+        s.assist_sent,
+        s.assist_accepted,
+        s.assist_rejected,
     );
 }
 
-const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | reboot";
+const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | reboot";
 
 /// Line commands over the USB serial port.
 #[embassy_executor::task]
@@ -307,6 +312,22 @@ async fn run(cmd: &str) {
         "flush" => STORAGE_CMDS.send(StorageCmd::Flush).await,
         "stop" => STORAGE_CMDS.send(StorageCmd::Stop).await,
         "start" => STORAGE_CMDS.send(StorageCmd::Start).await,
+        "gnssid" => {
+            // The receiver's identity frames in hex, whole, for AssistNow
+            // registration (scripts/assistnow.py reads these lines).
+            crate::shared::GNSS_IDENTITY.lock(|g| {
+                let g = g.borrow();
+                esp_println::print!("UBX-MON-VER ");
+                for b in g.mon_ver.iter() {
+                    esp_println::print!("{:02x}", b);
+                }
+                esp_println::print!("\nUBX-SEC-UNIQID ");
+                for b in g.uniqid.iter() {
+                    esp_println::print!("{:02x}", b);
+                }
+                esp_println::println!();
+            });
+        }
         "mark" => {
             let m = with_status(|s| {
                 s.marks += 1;

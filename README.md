@@ -20,6 +20,7 @@
 [Using it](#using-it) ·
 [The files](#the-files) ·
 [Getting your data off](#getting-your-data-off) ·
+[AssistNow](#faster-fixes-with-assistnow-optional) ·
 [What is proven](#what-is-proven) ·
 [Under the hood](#under-the-hood) ·
 [What is next](#what-is-next) ·
@@ -145,6 +146,7 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 | `ls` | Sessions and files with sizes |
 | `cat S0003/GNSS.CSV` | Send a file, framed and with a CRC-32 checksum |
 | `stop` / `start` | Close the session so the card is safe to pull / open a new one |
+| `gnssid` | The GPS receiver's identity frames, for AssistNow registration |
 | `flush` · `mark` · `reboot` | |
 
 ```sh
@@ -156,6 +158,26 @@ python3 scripts/verify.py data/S0003                           # sanity-check a 
 
 A transfer pauses logging while it runs (about 20 KB/s, so an hour of IMU data takes a few
 minutes); the gap is visible in the files.
+
+## Faster fixes with AssistNow (optional)
+
+From cold, a GPS receiver needs minutes to download satellite orbits from the sky. u-blox
+**AssistNow** sells that data over the internet, and the logger can load it from the card at
+power-on, so a fix comes in seconds, even on a trail with no signal.
+
+```sh
+python3 scripts/assistnow.py identity             # board plugged in: read the receiver's chip ID
+python3 scripts/assistnow.py register             # once per board, with your Thingstream ZTP token
+python3 scripts/assistnow.py fetch                # download fresh data to assist/ASSIST.UBX
+python3 scripts/assistnow.py install /Volumes/GPS # copy it to the card's root
+```
+
+You need a [Thingstream](https://portal.thingstream.io/) account with an AssistNow device profile
+(the evaluation plan covers three receivers). Its ZTP token goes in
+`~/.config/cairn/thingstream.env`, mode 0600 — **never in this repository**. At boot the logger
+streams `ASSIST.UBX` into the receiver and counts how many messages it accepted (`stat`,
+`EVENTS.CSV`). **Built, not yet tested on the board:** registration needs the receiver's own
+identity frames, so the first run happens with the board plugged in.
 
 ## What is proven
 

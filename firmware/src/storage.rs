@@ -491,6 +491,90 @@ fn flush_all(vm: &Vm, s: &Session) -> Result<(), ()> {
     Ok(())
 }
 
+/// ASSIST.UBX in the card's root: u-blox AssistNow data (UBX-MGA frames)
+/// fetched by `scripts/assistnow.py`. Read a little per tick and handed to the
+/// GNSS task frame by frame, so neither the IMU loop nor the receiver is
+/// flooded. The file is left in place for the next boot; the receiver ignores
+/// data that has expired.
+struct AssistFeed {
+    file: RawFile,
+    parser: trail_core::ubx::Parser,
+    /// Frames parsed but not yet accepted by the GNSS task. A 128-byte read
+    /// completes at most a handful of frames, so this never overflows: more
+    /// is read only once it is empty.
+    pending: heapless::Deque<shared::AssistFrame, 8>,
+    frames: u32,
+    eof: bool,
+}
+
+fn assist_open(vm: &Vm, s: &Session) -> Option<AssistFeed> {
+    let file = vm
+        .open_file_in_dir(s.root, "ASSIST.UBX", Mode::ReadOnly)
+        .ok()?;
+    let len = vm.file_length(file).unwrap_or(0);
+    event(
+        "assist_file",
+        format_args!("ASSIST.UBX found, {} bytes", len),
+    );
+    Some(AssistFeed {
+        file,
+        parser: trail_core::ubx::Parser::new(),
+        pending: heapless::Deque::new(),
+        frames: 0,
+        eof: false,
+    })
+}
+
+/// Advance the feed a little; returns false once it has finished and closed
+/// the file.
+fn assist_step(vm: &Vm, a: &mut AssistFeed) -> bool {
+    for _ in 0..4 {
+        // Hand over what is parsed; stop at the first refusal (queue full).
+        while let Some(f) = a.pending.pop_front() {
+            if let Err(embassy_sync::channel::TrySendError::Full(f)) = shared::ASSIST.try_send(f) {
+                let _ = a.pending.push_front(f);
+                return true;
+            }
+        }
+        if a.eof {
+            // The empty frame tells the GNSS task the file is done.
+            if shared::ASSIST.try_send(shared::AssistFrame::new()).is_err() {
+                return true;
+            }
+            event(
+                "assist_file",
+                format_args!("{} UBX frames queued for the receiver", a.frames),
+            );
+            let _ = vm.close_file(a.file);
+            return false;
+        }
+        let mut buf = [0u8; 128];
+        let n = match vm.read(a.file, &mut buf) {
+            Ok(0) | Err(_) => {
+                a.eof = true;
+                continue;
+            }
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if let Some(info) = a.parser.push(b) {
+                let mut frame = [0u8; 520];
+                if let Some(len) =
+                    trail_core::ubx::frame(info.class, info.id, a.parser.payload(&info), &mut frame)
+                {
+                    let mut v = shared::AssistFrame::new();
+                    if v.extend_from_slice(&frame[..len]).is_ok() && a.pending.push_back(v).is_ok()
+                    {
+                        a.frames += 1;
+                        with_status(|s| s.assist_queued += 1);
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 #[embassy_executor::task]
 pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'static>) {
     let delay = Delay::new();
@@ -619,6 +703,8 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
         }
         last_retry = Some(Instant::now());
 
+        let mut assist = session.as_ref().and_then(|s| assist_open(&vm, s));
+
         // Run until the card fails, or a stop/start asks for a new session.
         loop {
             ticker.next().await;
@@ -669,6 +755,12 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                 }
             }
 
+            if let Some(a) = assist.as_mut()
+                && !assist_step(&vm, a)
+            {
+                assist = None;
+            }
+
             let mut failed = false;
             if let Some(s) = session.as_ref() {
                 match write_out(&vm, s, &mut bufs, WRITE_THRESHOLD) {
@@ -706,6 +798,9 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                         }
                     }
                     StorageCmd::Stop => {
+                        if let Some(a) = assist.take() {
+                            let _ = vm.close_file(a.file);
+                        }
                         if let Some(s) = session.take() {
                             let _ = write_out(&vm, &s, &mut bufs, 0);
                             let n = s.number;
@@ -747,6 +842,9 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
             {
                 break; // retry the mount
             }
+        }
+        if let Some(a) = assist.take() {
+            let _ = vm.close_file(a.file);
         }
         if let Some(s) = session.take() {
             close_session(&vm, s);

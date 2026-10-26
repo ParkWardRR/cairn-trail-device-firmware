@@ -159,6 +159,11 @@ pub struct Status {
 
     pub marks: u16,
     pub display_on: bool,
+
+    pub assist_queued: u32,
+    pub assist_sent: u32,
+    pub assist_accepted: u32,
+    pub assist_rejected: u32,
 }
 
 pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
@@ -203,6 +208,10 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         soc_pct: 0,
         marks: 0,
         display_on: true,
+        assist_queued: 0,
+        assist_sent: 0,
+        assist_accepted: 0,
+        assist_rejected: 0,
     }));
 
 pub fn with_status<R>(f: impl FnOnce(&mut Status) -> R) -> R {
@@ -223,6 +232,24 @@ pub enum StorageCmd {
 }
 
 pub static STORAGE_CMDS: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
+
+/// The receiver's identity frames, whole (sync bytes to checksum), as u-blox
+/// AssistNow registration wants them: UBX-MON-VER and UBX-SEC-UNIQID.
+pub struct GnssIdentity {
+    pub mon_ver: heapless::Vec<u8, 320>,
+    pub uniqid: heapless::Vec<u8, 48>,
+}
+
+pub static GNSS_IDENTITY: Mutex<CriticalSectionRawMutex, RefCell<GnssIdentity>> =
+    Mutex::new(RefCell::new(GnssIdentity {
+        mon_ver: heapless::Vec::new(),
+        uniqid: heapless::Vec::new(),
+    }));
+
+/// AssistNow data (UBX-MGA frames) read from ASSIST.UBX on the card, on its
+/// way to the receiver. An empty frame marks the end of the file.
+pub type AssistFrame = heapless::Vec<u8, 512>;
+pub static ASSIST: Channel<CriticalSectionRawMutex, AssistFrame, 8> = Channel::new();
 
 /// The firmware's identity, as printed at boot and written to INFO.TXT.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

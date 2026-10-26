@@ -97,6 +97,32 @@ bootloader; that reboot also sets the RTC's *force download boot* bit (`RTC_CNTL
 `scripts/flash.sh` clears it. A full backup of the stock image is in `~/cairn-backups`
 (SHA-256 `1a1310d3…05c36`); restoring it is `esptool write-flash 0x0 <backup>`.
 
+## AssistNow
+
+u-blox AssistNow supplies the orbit data a receiver otherwise has to download from the satellites
+themselves, which takes minutes from cold. The logger takes it from the card:
+
+- **At boot** the GNSS task reads the receiver's identity — UBX-MON-VER and UBX-SEC-UNIQID, the
+  chip's unique ID — and keeps both whole frames; `gnssid` on the console prints them in hex
+  (`EVENTS.CSV` records the unique ID as `gnss_uniqid`).
+- **Registration** (`scripts/assistnow.py register`, once per board) posts them to Thingstream's
+  zero-touch-provisioning endpoint with the device profile's ZTP token:
+  `{"token": …, "messages": {"UBX-SEC-UNIQID": "<hex>", "UBX-MON-VER": "<hex>"}}` — a format
+  confirmed from the API's validation errors (`messages` must be an object of hex strings). The
+  response, which carries the chipcode bound to this receiver, is kept in
+  `~/.config/cairn/assistnow.json` (0600).
+- **Download** (`fetch`) asks the service the response names for data with that chipcode and keeps
+  it only if it is well-formed UBX; **install** copies it to `ASSIST.UBX` in the card's root.
+- **On the board**, the storage task reads `ASSIST.UBX` a little per tick and hands it frame by
+  frame to the GNSS task, which writes it to the receiver after configuring it (UBX input on,
+  `CFG-NAVSPG-ACKAIDING` so each message is answered with UBX-MGA-ACK), 8 ms apart. `stat` shows
+  frames queued, sent, accepted and not used; `EVENTS.CSV` records `assist_file` and
+  `assist_sent`. The file stays on the card; the receiver ignores data that has expired.
+
+Credentials live in `~/.config/cairn/thingstream.env` (mode 0600; the script refuses a file others
+can read) and never in this repository. **Status: built, not yet run** — identity capture,
+registration, download and the feed all wait for the board to be plugged in.
+
 ## SD cards
 
 FAT16 or FAT32. A card formatted by macOS Disk Utility with its default scheme (GUID partition

@@ -18,3 +18,6 @@ crates/*/target/
 dist/
 # Files pulled off the card for verification
 pulled/
+
+# AssistNow data downloaded by scripts/assistnow.py (refreshed, not versioned)
+assist/
