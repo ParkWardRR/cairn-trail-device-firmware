@@ -66,7 +66,8 @@ storage task owns the bus and the thread-mode tasks wait for it. The gap is visi
 ```sh
 PY=$(ls /opt/homebrew/Cellar/esptool/*/libexec/bin/python | head -1)   # has pyserial
 $PY scripts/console.py --cmd stat --cmd ls
-$PY scripts/console.py --pull S0007/GNSS.CSV --pull S0007/IMU.CSV --out pulled/S0007
+$PY scripts/console.py --session S0007 --out pulled/S0007     # every file of a session
+$PY scripts/console.py --pull S0007/GNSS.CSV --out pulled/S0007  # or one at a time
 python3 scripts/verify.py pulled/S0007 --stationary
 ```
 
@@ -106,19 +107,25 @@ first basic-data partition to the FAT library as if it were an MBR partition, ne
 ## How v0.1.0 was verified
 
 On 2026-10-25, on the owner's unit (V3.1 carrier, ESP32-S3 rev 0.2, MAX-M10S SPG 5.10, 62.6 GB
-SDXC), indoors, on USB power with no cell fitted. Session S0007, about seven minutes, every file
-pulled back over USB with matching CRC-32s, then `scripts/verify.py --stationary`:
+SDXC formatted FAT32 under a GUID map), indoors, on USB power with no cell fitted. Each build was
+flashed from a clean commit, left to record, and every file of its session pulled back over USB
+with matching CRC-32s; then `scripts/verify.py --stationary`. The output is in
+[`evidence/`](../evidence/).
 
-| Stream | Result |
-|---|---|
-| GNSS | 1.00 Hz, largest gap 1014 ms, 24 columns in every row; no fix (no sky) |
-| SAT | per-satellite rows every 5 s; up to 18 satellites seen, best C/N0 15 dB-Hz through the roof |
-| IMU | 50.02 Hz; at rest \|a\| averages 979 mg, median \|gyro\| under 5 °/s, 26–27 °C |
-| BARO | 4.00 Hz; 1010.4–1010.5 hPa, elevation steady to 0.8 m, no false climb |
-| MAG | 9.8 Hz, live readings |
-| POWER | every 5 s; USB 5.0 V, no cell; ALDO3 off in every row |
-| EVENTS | boot, rails, RTC, IMU steps, I²C devices, SD layout, session, GNSS version and configuration, marks |
-| PPS | empty, as it must be without a fix |
+| | Verbose build (`b54d1a8`, session S0009) | Release build (`3ea9c46`, session S0012) |
+|---|---|---|
+| GNSS | 1.00 Hz over 264 s, 24 columns every row | 1.00 Hz over 183 s |
+| IMU | 50.04 Hz; at rest \|a\| ≈ 1 g, median \|gyro\| < 5 °/s | 50.01 Hz; \|a\| mean 987 mg |
+| Barometer | 4.00 Hz; elevation steady to under a metre | 4.00 Hz |
+| Magnetometer | 9.75 Hz | 9.78 Hz |
+| Power | every 5 s, ALDO3 off in every row | every 5 s, ALDO3 off in every row |
+| Events | boot, rails, RTC, IMU steps, SD layout, session, GNSS, **the BOOT mark and a PWR display toggle pressed by hand** | boot, rails, RTC, IMU steps, SD layout, session, GNSS, a console mark |
+| PPS | empty, as it must be without a fix | empty |
+| Screen | status screen shown, checked by eye | turned itself off after 60 s, as the release build should |
+
+Both runs showed up to 3.7 g in the IMU's first half-second after enabling, while its low-pass
+filters settle. **v0.1.0 skips the first second** (`83f494f`); that change was merged after the
+last verified run and has not itself been checked on the board.
 
 **Not yet proven:** a GNSS fix (and therefore PPS, RTC correction from GNSS and the elevation
 anchoring), the display and BOOT button by eye, battery operation and charging, and long runs.

@@ -1,0 +1,87 @@
+[pull] S0009/INFO.TXT: 224 bytes (declared 224, streamed 224) crc32 eecce738 vs eecce738 -> OK -> pulled/S0009/S0009_INFO.TXT
+[pull] S0009/EVENTS.CSV: 1790 bytes (declared 1790, streamed 1790) crc32 23ef2089 vs 23ef2089 -> OK -> pulled/S0009/S0009_EVENTS.CSV
+[pull] S0009/GNSS.CSV: 45524 bytes (declared 45524, streamed 45524) crc32 fd126e9a vs fd126e9a -> OK -> pulled/S0009/S0009_GNSS.CSV
+[pull] S0009/SAT.CSV: 15770 bytes (declared 15770, streamed 15770) crc32 5122dc80 vs 5122dc80 -> OK -> pulled/S0009/S0009_SAT.CSV
+[pull] S0009/BARO.CSV: 59425 bytes (declared 59425, streamed 59425) crc32 b783c5d2 vs b783c5d2 -> OK -> pulled/S0009/S0009_BARO.CSV
+[pull] S0009/MAG.CSV: 79076 bytes (declared 79076, streamed 79076) crc32 16e004e5 vs 16e004e5 -> OK -> pulled/S0009/S0009_MAG.CSV
+[pull] S0009/POWER.CSV: 2633 bytes (declared 2633, streamed 2633) crc32 e685c619 vs e685c619 -> OK -> pulled/S0009/S0009_POWER.CSV
+[pull] S0009/PPS.CSV: 10 bytes (declared 10, streamed 10) crc32 7e0249c9 vs 7e0249c9 -> OK -> pulled/S0009/S0009_PPS.CSV
+[pull] S0009/IMU.CSV: 550276 bytes (declared 550276, streamed 550276) crc32 495a6929 vs 495a6929 -> OK -> pulled/S0009/S0009_IMU.CSV
+
+GNSS.CSV
+  ok    header starts with t_ms (24 columns)
+  ok    265 rows
+  ok    every row has 24 columns
+  ok    t_ms never goes backwards (0 steps back)
+  ok    rate 1.00/s over 264 s (expect 1.0/s ±10%)
+        largest gap 1014 ms
+        0 of 265 epochs with a fix; max sats 0
+
+SAT.CSV
+  ok    header starts with t_ms (11 columns)
+  ok    426 rows
+  ok    every row has 11 columns
+  ok    t_ms never goes backwards (0 steps back)
+        426 satellite rows, best C/N0 18 dB-Hz
+
+IMU.CSV
+  ok    header starts with t_ms (8 columns)
+  ok    14406 rows
+  ok    every row has 8 columns
+  ok    t_ms never goes backwards (0 steps back)
+  ok    rate 50.04/s over 288 s (expect 50.0/s ±15%)
+        largest gap 5792 ms
+        |a| mean 993 mg, min 882, max 3684
+  ok    stationary: |a| averages ~1 g
+  ok    IMU temperature in -20..70 C
+  ok    stationary: median |gyro| < 5 dps
+
+BARO.CSV
+  ok    header starts with t_ms (9 columns)
+  ok    1107 rows
+  ok    every row has 9 columns
+  ok    t_ms never goes backwards (0 steps back)
+  ok    rate 4.00/s over 276 s (expect 4.0/s ±15%)
+        largest gap 3281 ms
+  ok    pressure in 300..1100 hPa (1010.5..1010.6)
+        elevation 22.5..23.2 m, gain 0.0 m, loss 0.0 m
+  ok    stationary: elevation varies < 3 m
+  ok    humidity in 0..100 %
+
+MAG.CSV
+  ok    header starts with t_ms (6 columns)
+  ok    2735 rows
+  ok    every row has 6 columns
+  ok    t_ms never goes backwards (0 steps back)
+  ok    rate 9.75/s over 280 s (expect 10.0/s ±25%)
+        largest gap 3529 ms
+  ok    magnetometer reads non-zero
+
+POWER.CSV
+  ok    header starts with t_ms (12 columns)
+  ok    58 rows
+  ok    every row has 12 columns
+  ok    t_ms never goes backwards (0 steps back)
+  ok    rate 0.20/s over 287 s (expect 0.2/s ±25%)
+        largest gap 6164 ms
+        vbus 4997..5013 mV, battery=0
+  ok    ALDO3 (LoRa) off in every power row
+
+EVENTS.CSV
+  ok    header starts with t_ms (3 columns)
+  ok    28 rows
+  ok    every row has 3 columns
+  ok    t_ms never goes backwards (0 steps back)
+        events: boot, button, diag_i2c, diag_imu, gnss_cfg, gnss_cfg_reset, gnss_version, i2c0_devices, i2c0_scan, imu, imu_step, mark, pmu, rails, rails_as_found, rtc, sd, sd_layout, session
+  ok    event 'boot' recorded
+  ok    event 'session' recorded
+  ok    event 'pmu' recorded
+  ok    event 'rails' recorded
+  ok    event 'imu' recorded
+  ok    event 'gnss_version' recorded
+
+PPS.CSV
+  ok    header starts with t_ms (2 columns)
+  ok    no PPS rows, and no GNSS fix to cause any
+
+all checks passed

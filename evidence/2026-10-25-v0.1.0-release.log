@@ -1,0 +1,20 @@
+INFO  [boot] cairn-trail 0.1.0 (release) 83f494fa86
+INFO  [rtc] 2026-10-01T01:19:41 voltage_low=false plausible=true
+INFO  [sd] card in SPI mode, 62599 MB, type Some(SdhcSdxc)
+INFO  [imu_step] before_reset value=0x00 whoami=0x05
+INFO  [imu_step] reset_result value=0x80 whoami=0x05
+INFO  [imu_step] ctrl1_default value=0x20 whoami=0x05
+INFO  [imu_step] ctrl1_addr_ai value=0x60 whoami=0x05
+INFO  [imu_step] ctrl2_accel value=0x27 whoami=0x05
+INFO  [imu_step] ctrl3_gyro value=0x57 whoami=0x05
+INFO  [imu_step] ctrl5_lpf value=0x11 whoami=0x05
+INFO  [imu_step] ctrl7_enable value=0x03 whoami=0x05
+INFO  [imu] QMI8658 revision 0x7c, +-8 g, +-512 dps, 62.5 Hz
+INFO  [sd_layout] GPT, using its first basic-data partition
+INFO  [session] S0014 opened; card 62599 MB
+INFO  [i2c0_scan] [3c, 77]
+INFO  [i2c0_devices] mag=QMC6309 (carrier V3.1) oled=Some(60) bme280=Some(119)
+INFO  [gnss_version] baud=115200 sw=ROM SPG 5.10 (7b202e) hw=000A0000 FWVER=SPG 5.10;PROTVER=34.10;MOD=MAX-M10S;GPS;GLO;GAL;BDS;SBAS;QZSS;
+INFO  [gnss_cfg_reset] ack=false (may be lost to the baud change)
+INFO  [gnss_cfg] baud=9600 ack=true
+INFO  S0014 sd=1 150240B drop=0 | gnss nofix 0/1sv pvt=52 | 1010.6hPa elev=22.0m +0/-0 | imu=1 mag=1 | vbus=5010mV bat=0mV

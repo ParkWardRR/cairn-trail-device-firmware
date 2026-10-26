@@ -12,301 +12,199 @@
 | Modules | [cairn-modules](https://github.com/ParkWardRR/cairn-modules) | Interpretation, separated from the logging core: one package per module | YAML · Rust | [readme](https://github.com/ParkWardRR/cairn-modules#readme) | [issues](https://github.com/ParkWardRR/cairn-modules/issues) | [CI](https://github.com/ParkWardRR/cairn-modules/actions) |
 
 <sub>Shared: [Roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md) · [Install](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/INSTALL.md) · [Architecture](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/architecture.md) · [Threat model](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/threat-model.md) · [Trust model](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trust-model-v3.md) · [Contracts](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts) · [Archive of the original monorepo](https://github.com/ParkWardRR/cairn-original-monorepo-archive)</sub>
-<!-- cairn-nav:end -->
 <h1 align="center">Cairn trail device firmware</h1>
-<p align="center"><strong>Firmware for a pocket-sized Cairn recorder you carry on a hike or a walk, or bring along in a car that has no dongle. It records where you went, how high you climbed and how fast you moved into the same encrypted, tamper-evident bundles the car's dongle writes, and hands them to your own server. It never deletes a recording until your server has signed for exactly that recording.</strong></p>
+<p align="center"><strong>Firmware for a pocket GNSS recorder — the LILYGO T-Beam Supreme — for hiking, walking, and driving without the Cairn dongle. Rust on esp-hal and Embassy.</strong></p>
 
 <p align="center">
+  <a href="https://github.com/ParkWardRR/cairn-trail-device-firmware/releases/latest"><img src="https://img.shields.io/github/v/release/ParkWardRR/cairn-trail-device-firmware?style=flat-square&label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/CI-local_(scripts%2Fci.sh)-2E86C1?style=flat-square" alt="Local CI">
+  <img src="https://img.shields.io/badge/target-ESP32--S3_·_T--Beam_Supreme-2E86C1?style=flat-square" alt="ESP32-S3, T-Beam Supreme">
+  <img src="https://img.shields.io/badge/Rust-esp--hal_1.2_·_Embassy-2E86C1?style=flat-square" alt="Rust, esp-hal 1.2, Embassy">
+  <img src="https://img.shields.io/badge/LoRa-off-7F8C8D?style=flat-square" alt="LoRa off">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Blue_Oak_1.0.0-2E86C1?style=flat-square" alt="Blue Oak Model License 1.0.0"></a>
-  <img src="https://img.shields.io/badge/target-ESP32--S3_·_LILYGO_T--Beam_Supreme-2E86C1?style=flat-square" alt="ESP32-S3, LILYGO T-Beam Supreme">
-  <img src="https://img.shields.io/badge/firmware-Rust_·_esp--hal_·_Embassy-2E86C1?style=flat-square" alt="Rust, esp-hal, Embassy">
-  <img src="https://img.shields.io/badge/contracts-v0.8.0-2E86C1?style=flat-square" alt="contracts-v0.8.0">
-  <img src="https://img.shields.io/badge/firmware-v0.1.0_capture_logger-27AE60?style=flat-square" alt="v0.1.0 capture logger">
 </p>
 
 ---
 
-> **Status, 2026-10-25: v0.1.0, a capture logger, runs on the owner's unit.** It records GNSS
-> (UBX-NAV-PVT and per-satellite NAV-SAT), the IMU at 50 Hz, the barometer with fused elevation and
-> climb at 4 Hz, the magnetometer at 10 Hz, power every 5 s, the GNSS time pulse and every event,
-> each to its own CSV file in a new session directory on the SD card, with the LoRa radio held
-> off. **Proven on the board** (indoors, on USB power): every stream at its rate, files pulled back
-> over USB with matching CRC-32s, and the checks in `scripts/verify.py` passing — see
-> [docs/firmware.md](docs/firmware.md). **Not yet proven:** a GNSS fix and the PPS line (no sky
-> indoors), the display and BOOT button by eye, and anything on a battery. The rest of this README —
-> sealed `format/v3` bundles, activities, offload — is still *Designed*: the CSV logger is the
-> bring-up tool that T2's sealed record replaces.
+**v0.1.0 is a capture logger.** Power it on and it records everything the board can sense —
+GNSS, every satellite it sees, accelerometer and gyroscope, pressure with elevation and climb,
+the magnetic field, battery and power rails, the GNSS time pulse — each to its own CSV file in a
+new session folder on the SD card. The LoRa radio stays off. A screen shows what it is doing,
+the BOOT button marks a spot, and a USB console reads the card without taking it out.
 
-This repository is one of seven that make up [Cairn](https://github.com/ParkWardRR/cairn-driving-log-selfhosted),
-a self-hosted driving log that is growing a second device. The car has a dongle on its OBD-II
-port. This is the other one — the one you carry.
-
-```mermaid
-flowchart LR
-    you["You, on foot<br/>(or in a car with no dongle)"] --> trail["<b>Trail device</b><br/>(this repository)"]
-    trail -- "BLE: sealed bundles" --> phone["iPhone app<br/>cairn-ios-companion-app"]
-    trail -- "Wi-Fi at home: sealed bundles" --> server["Your server<br/>cairn-vehicle-server"]
-    phone -- "authenticated upload" --> server
-    server --> web["Web dashboard<br/>cairn-vehicle-web-dashboard"]
-    server -. "signed receipt" .-> phone
-    phone -. "receipt, over BLE" .-> trail
-```
-
-The rule is the dongle's rule: the carrier moves ciphertext it cannot read, and the device frees
-its card only on a receipt it has verified itself.
+It is the first step of the [Cairn](https://github.com/ParkWardRR/cairn-driving-log-selfhosted)
+trail device. The CSV files are a bring-up format: the next release writes Cairn's sealed,
+encrypted `format/v3` bundles instead, so a hike reaches your own server the way the car's drives
+do.
 
 **Contents:**
-[v0.1 capture logger](docs/firmware.md) ·
-[What it is](#what-the-trail-device-is-and-is-not) ·
-[Hardware](#hardware) ·
-[How it fits Cairn](#how-it-fits-cairn) ·
-[Firmware stack](#firmware-stack-rust-esp-hal-embassy) ·
-[Activities](#activities-hike-walk-drive) ·
+[Quick start](#quick-start) ·
 [What it records](#what-it-records) ·
-[Display and buttons](#display-and-buttons) ·
-[Power](#power) ·
-[Getting recordings home](#getting-recordings-home) ·
-[LoRa: off](#lora-off) ·
-[Security](#security-posture) ·
-[Contracts](#contracts) ·
+[Using it](#using-it) ·
+[Status](#status-what-is-proven) ·
+[Hardware](#hardware) ·
 [Where it is going](#where-it-is-going) ·
-[Layout](#repository-layout) ·
+[Building and releasing](#building-and-releasing) ·
+[Repository layout](#repository-layout) ·
 [Contributing](#contributing)
 
-## What the trail device is, and is not
+## Quick start
 
-**It is** a battery-powered GNSS recorder with a barometer, an accelerometer and gyroscope, a
-compass, a real-time clock, a small screen and two buttons. It writes Cairn `format/v3` bundles —
-every frame encrypted, every bundle signed — so the server, the dashboard and the phone treat a
-hike exactly as they treat a drive, apart from what it means.
+You need a **LILYGO T-Beam Supreme** (ESP32-S3, u-blox MAX-M10S, 1.3" OLED) and a microSD card
+formatted **FAT32** (macOS Disk Utility's *MS-DOS (FAT)* works with either partition scheme; exFAT
+does not).
 
-**It is not:**
+1. Download `cairn-trail-<version>-<commit>-release.bin` from the
+   [latest release](https://github.com/ParkWardRR/cairn-trail-device-firmware/releases/latest) and
+   check it against `SHA256SUMS`.
+2. Back up what is on the board first:
+   `esptool --port /dev/cu.usbmodem… read-flash 0 ALL tbeam-backup.bin`.
+3. Flash: `esptool --chip esp32s3 --port /dev/cu.usbmodem… write-flash 0x0 cairn-trail-…-release.bin`.
 
-- **an OBD-II logger.** It has no vehicle bus. In a car it records a GNSS and motion track and
-  nothing about the engine. If the car's dongle recorded the same window, the server lays the two
-  side by side; the two devices never talk to each other.
-- **an emergency device.** It is not a personal locator beacon, it has no satellite link, and
-  nothing here will claim it can summon help.
-- **a LoRa device.** The board ships as a Meshtastic node; this firmware replaces that and keeps
-  the LoRa radio **off** ([LoRa](#lora-off)).
+Coming from stock **Meshtastic**, the board's TinyUSB port ignores esptool's reset. Open the port
+at 1200 baud to reboot it into the bootloader, and afterwards clear the RTC's force-download bit
+(`esptool … write-mem 0x6000812C 0`) or every reset returns to the bootloader.
+[`scripts/flash.sh`](scripts/flash.sh) does both. Details:
+[docs/firmware.md](docs/firmware.md#building-flashing-releasing--all-local).
 
-## Hardware
-
-**LILYGO T-Beam Supreme**, 915 MHz, with the u-blox MAX-M10S GNSS and the 1.3" SH1106 OLED. The
-full pin map, I²C addresses and the things that shape the firmware are in
-[docs/hardware.md](docs/hardware.md). All of it is vendor documentation until bring-up reads each
-part off the real unit.
-
-| Part | Chip | Used for |
-|---|---|---|
-| MCU | ESP32-S3FN8, 8 MB flash, 8 MB PSRAM | Everything; Wi-Fi and BLE 5 |
-| GNSS | u-blox MAX-M10S, four constellations | Position, read as UBX-NAV-PVT so accuracy is the receiver's own estimate |
-| LoRa | Semtech SX1262, 915 MHz | **Nothing.** Held off from boot to save battery |
-| Display | SH1106 OLED, 128×64 | Status, the activity, a bearing back to the start |
-| IMU | QMI8658, 6-axis | Steps, cadence, motion, wake-on-motion |
-| Compass | QMC6310 / QMC6309 | Heading when standing still |
-| Barometer | Bosch BME280 | Elevation change, temperature, humidity |
-| RTC | NXP PCF8563 | Time before the first fix — the first Cairn device with one |
-| PMU | X-Powers AXP2101 | Rails, charging, fuel gauge, the power key |
-| Storage | microSD | A cache of ciphertext |
-| Battery | one 18650 | — |
-
-## How it fits Cairn
-
-Most of what makes the dongle trustworthy carries over unchanged, because none of it was about
-cars:
-
-| From the dongle | Here |
-|---|---|
-| `format/v3` sealing: AEAD per frame, CRC chain, Merkle root, signed manifest | The same format, byte for byte, passing the same 33 vectors on this silicon |
-| `K_root` in NVS, escrowed through `enrolment/v1` | The same enrolment blob and USB console protocol |
-| The device counter, reserved before the first segment exists | The same rule |
-| Deletion only on a verified, signed receipt | The same rule — it is [invariant 2](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#guiding-invariants) |
-| `ble/v1` bundle offload through the phone | The same protocol; the phone does not care what produced the bundle |
-| The GNSS plausibility gate | Re-tuned for walking speeds, with the pedometer as the cross-check OBD speed was in the car |
-| Signed OTA with a separate update key | The same design on the S3's A/B partitions |
-
-**What carries over is design, contracts and vectors — not the dongle's C.** This firmware is
-Rust. The one piece of code it shares is `format/v3`: the dongle repository's emulator is already
-a Rust implementation of it, and it is extracted into a `no_std` crate, `cairn-format`, that the
-emulator and this firmware both depend on, pinned by git revision.
-
-**Who carries it.** Every v3 bundle names the vehicle its device is assigned to, and intake checks
-that before it decrypts anything. The planned answer is a *carrier*: the server's vehicle registry
-gains a `kind` (`car` or `person`), and this device is assigned to a person. No format change; a
-hike stays apart from a drive because its carrier has a different id. Driving with the trail
-device does not reassign it — the activity is classified as a drive, and linked to the car's own
-trip where one overlaps.
-
-The full design, with its alternatives and open decisions, is
-[docs/trail-device-plan.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md)
-in the front door.
-
-## Firmware stack: Rust, esp-hal, Embassy
-
-The owner's choice (2026-10-25). The full crate map and its reasoning are in
-[§3.1 of the plan](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md#31-the-firmware-stack-rust-esp-hal-embassy).
-
-| Layer | Crates |
-|---|---|
-| HAL and runtime | `esp-hal` 1.x; Embassy (`embassy-executor`, `embassy-time`, `embassy-sync`) through `esp-rtos`; `esp-alloc` on the PSRAM |
-| Radio | `esp-radio` for Wi-Fi and the BLE controller; `trouble-host` for the BLE host and the `ble/v1` GATT service; `embassy-net` for `uplink/v1`. No LoRa stack |
-| Storage | the card through `embedded-fatfs` or `embedded-sdmmc` (chosen in T2 — sealing needs an atomic rename); keys and the device counter in flash through `esp-storage` + `sequential-storage`; partitions and OTA through `esp-bootloader-esp-idf` |
-| Sensors and display | `ublox` (UBX-NAV-PVT), `bme280`, `sh1106` + `embedded-graphics`; **drivers written here** for the AXP2101, QMI8658, QMC6310/6309 and PCF8563 |
-| Bundles and crypto | `cairn-format` (shared with the emulator); RustCrypto `chacha20poly1305`, `hkdf`, `sha2`, `ed25519-dalek`, `x25519-dalek`; `esp-hal`'s TRNG |
-| Logs | `defmt` over USB-Serial-JTAG |
-
-**One task owns each bus** and reports facts over channels to **one capture controller that owns
-all state** — the dongle's rule, which Embassy makes the natural shape. The SD card and the IMU
-share an SPI bus behind `embassy-embedded-hal`'s shared-bus mutex, so the dongle's unlocked-bus
-failure cannot be written by accident.
-
-The S3 is Xtensa, so the toolchain is Espressif's fork, installed with
-[`espup`](https://github.com/esp-rs/espup); [`espflash`](https://github.com/esp-rs/espflash)
-flashes and monitors. The logic crates are `no_std` and test on stable Rust on the host, where the
-contract vectors are replayed.
-
-## Activities: hike, walk, drive
-
-An **activity** is this device's trip: one outing, start to finish, even across a battery swap.
-With no ignition to watch, the evidence is movement:
-
-| | Evidence |
-|---|---|
-| **Start** | A sustained step cadence; or GNSS speed above walking pace with the IMU agreeing; or a button |
-| **Pause** | Stillness — no steps, the IMU at rest, GNSS speed in its noise. Lunch at the summit is part of the hike |
-| **Stop** | Stillness for longer than the stop dwell, or a button. A pre-roll ring keeps the first minute of movement |
-
-The device writes its own guess at the mode — `walk`, `hike`, `run`, `drive` — with a confidence,
-and the **server decides** from the whole track: cadence, speed, climb rate, and whether the car's
-dongle was recording at the same time. A correction is an annotation, never an edit to a sealed
-bundle.
-
-| Mode | GNSS | Why |
-|---|---|---|
-| On foot | 1 Hz | A point every 1–1.5 m at walking pace — enough to keep a switchback |
-| Drive | 5 Hz | The dongle's density |
-| Endurance | 0.1 Hz, receiver power-save | Multi-day trips; an honest gap beats an invented line |
+Insert the card with USB unplugged, power on, and a new `S0001` folder starts filling.
 
 ## What it records
 
-Everything the dongle records that applies, plus what a body-worn device can add. The new record
-types are **designed and not yet in the contract**; they are additive, so a decoder that predates
-them skips them and still reads the track.
+One folder per power-on, `S0001`, `S0002`, …; every row starts with `t_ms`, milliseconds since
+boot, so rows line up across files. UTC is a column wherever a source supplies it.
 
-| Record | Status |
+| File | Rate | What |
+|---|---|---|
+| `GNSS.CSV` | 1 Hz | Everything in u-blox UBX-NAV-PVT: time, fix, position, altitudes, the receiver's own accuracy estimates, velocity, heading, DOP |
+| `SAT.CSV` | 5 s | Every satellite: constellation, signal strength, elevation, azimuth, used in the fix |
+| `IMU.CSV` | 50 Hz | Accelerometer (±8 g), gyroscope (±512 °/s), temperature |
+| `BARO.CSV` | 4 Hz | Pressure, temperature, humidity — and elevation, anchored to GNSS, with climb and descent |
+| `MAG.CSV` | 10 Hz | Magnetic field and an uncalibrated heading |
+| `POWER.CSV` | 5 s | Battery, USB and system voltage, charging, fuel gauge, which power rails are on |
+| `PPS.CSV` | 1 Hz | The GNSS time pulse against the board's clock (once there is a fix) |
+| `EVENTS.CSV` | — | Boot identity, sensor bring-up, the SD card's layout, GNSS configuration, fixes gained and lost, marks, buttons, errors |
+| `INFO.TXT` | — | Firmware version and commit, MAC, session |
+
+Every column is described in [docs/firmware.md](docs/firmware.md#what-it-records).
+
+## Using it
+
+| | |
 |---|---|
-| `GNSS_SAMPLE`, `GNSS_GAP`, `IMU_SUMMARY`, `DEVICE_HEALTH`, `TRIP_EVENT`, `STATE_TRANSITION`, `TIME_OBSERVATION`, `POLICY_SNAPSHOT` | In `format/v3` today |
-| `TIME_OBSERVATION` from the **RTC** (source 4) | Reserved in `format/v3` for exactly this hardware; to be defined |
-| `BARO_SAMPLE` — pressure, temperature, humidity | Designed |
-| `POWER_STATUS` — cell voltage, charge, charging, USB present | Designed |
-| `ACTIVITY_SUMMARY` — steps, cadence, the device's mode guess, magnetic heading | Designed |
-| `TRIP_EVENT` `MARK`, `MODE_CHANGE`, `USER_START`, `USER_STOP` | Designed |
-| Manifest `device_class` = `lilygo-tbeam-supreme` | Designed |
+| **BOOT** (short) | Mark the spot — written to `EVENTS.CSV` with position and elevation |
+| **BOOT** (hold 1.5 s) or **PWR** (tap) | Screen on/off. The release build turns it off after 60 s |
+| **PWR** (hold 6 s) | Power off |
+| **Screen** | Session and recording state, fix and satellites, position, GNSS and barometric altitude, climb, pressure, battery |
+| **USB console** | `stat`, `ls`, `cat <file>` (with CRC-32), `flush`, `stop` (card safe to remove), `start`, `mark`, `reboot` |
 
-Elevation is **raw on the device and fused on the server**: GNSS altitude is noisy by tens of
-metres, barometric pressure is smooth but drifts with the weather, and only together do they give
-a climb you can defend.
+Pull a session and check it from a Mac:
 
-## Display and buttons
+```sh
+PY=$(ls /opt/homebrew/Cellar/esptool/*/libexec/bin/python | head -1)   # any Python with pyserial
+$PY scripts/console.py --session S0003 --out pulled/S0003   # every file, CRC-checked
+python3 scripts/verify.py pulled/S0003 --stationary          # rates, columns, plausible values
+```
 
-Off unless woken. Four screens — **Status** (recording, and how the device knows; fix; battery;
-bundles awaiting a receipt), **Activity** (time, distance, climb, pace), **Back** (bearing and
-distance to where you started) and **Clock** (time and which source set it).
+A `cat` pauses logging while it streams (about 20 KB/s); the gap shows in the files.
 
-| Input | Action |
+## Status: what is proven
+
+Cairn's three words, kept apart: **Proven** ran on the real board with named evidence; **Built**
+exists and passes its tests; **Designed** is a plan.
+
+| | |
 |---|---|
-| BOOT, short | Next screen |
-| BOOT, hold 2 s | **Mark** this spot |
-| PWR, short | Wake the display |
-| BOOT + PWR, hold | Start or stop an activity by hand |
-| PWR, long | Power off — the device seals its open bundle first when the PMU warns it |
+| **Proven** (2026-10-25, the owner's board, indoors on USB) | Every stream at its rate (GNSS 1.00 Hz, IMU 50.0 Hz, barometer 4.00 Hz, magnetometer ~10 Hz, power every 5 s); files pulled back over USB with matching CRC-32s; `verify.py` passing for both the verbose and the release build ([evidence](evidence/)); the screen, the BOOT mark and the PWR toggle by eye; the LoRa rail off in every power row; macOS GPT-formatted cards |
+| **Built, not yet proven** | A GNSS fix — and with it PPS, setting the clock from GNSS, anchoring elevation — because the board has not seen the sky; running on an 18650; long runs; skipping the IMU's first second after start-up (merged after the last verified run) |
+| **Designed** | Sealed `format/v3` bundles, activities (hike, walk, drive), Bluetooth and Wi-Fi offload to a Cairn server, battery-life work, secure boot — [the plan](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md) |
 
-The recording indicator only claims recording on fresh evidence, and says so when it cannot
-confirm.
+## Hardware
 
-## Power
+**LILYGO T-Beam Supreme** — an ESP32-S3 core module on a carrier board.
 
-**Targets, unmeasured:** at least **24 hours** of 1 Hz on-foot recording on one 3000 mAh 18650 with
-the screen mostly off, and at least **5 days** in endurance mode. The real numbers will come from a
-meter, not a datasheet. Two figures from other firmware set expectations
-([prior-art.md](docs/prior-art.md#1-power-and-the-lora-radio)): SoftRF quotes about **105 mA** for
-the whole board with the M10 tracking — under 29 hours on that cell before anything else draws — so
-receiver power save is required, not optional; and LilyGO measures about **1.45 mA** in deep sleep
-on this board, so endurance mode saves power by cutting rails, not just by sleeping the CPU.
+| Part | Chip | |
+|---|---|---|
+| MCU | ESP32-S3, 8 MB flash | Rust, `esp-hal` + Embassy |
+| GNSS | u-blox MAX-M10S | UBX only, configured fresh every boot |
+| IMU | QMI8658 | On the SPI bus shared with the SD card |
+| Barometer | Bosch BME280 | Pressure, temperature, humidity |
+| Magnetometer | QMC6309 (V3.1) / QMC6310 (V3.0) | |
+| Power | X-Powers AXP2101 | Rails, charging, fuel gauge, PWR key |
+| Clock | NXP PCF8563 | Own backup cell |
+| Display | SH1106, 128×64 | |
+| LoRa | Semtech SX1262 | **Unused and unpowered**: its rail (ALDO3) is switched off at every boot — the PMU's power-up default turns it on |
 
-A low cell **seals, it does not truncate**: at a PMU threshold the open bundle is sealed and
-recording stops, with enough left for the clock and a later boot. The IMU's interrupt line cannot
-wake the S3 from deep sleep (it is not on an RTC-capable pin), so the design light-sleeps while an
-activity could start and deep-sleeps on a timer or a button when it has been still for hours — to
-be confirmed on the board.
-
-## Getting recordings home
-
-1. **BLE through the iPhone app**, by the same `ble/v1` offload the dongle uses. Until the app
-   carries bundles, `cmd/cairn-phone` on a Mac does.
-2. **Wi-Fi at home**, by `uplink/v1` — this device has no legacy listener to migrate from, so it
-   is meant to be the first to implement the device-signed uplink.
-3. **The SD card**, read on a Mac and pushed with the server's `cairn-push`. The path that always
-   works.
-
-There is no cellular modem on this board.
-
-## LoRa: off
-
-**The owner's decision, 2026-10-25: the LoRa radio is not used for anything, and is held off to
-save battery.** At every boot, before anything else, the firmware disables the radio's PMU rail if
-it has one of its own, or sends the SX1262 its sleep command if it shares a rail — an SX1262 left
-in its power-on standby draws on the order of half a milliamp all day. Bring-up measures the
-board's current with the radio held off. There is no LoRa crate, task or traffic beyond that one
-command. Leave the antenna fitted anyway.
-
-The earlier *last seen* beacon design stays recorded in
-[`beacon/v1`](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts/beacon/v1),
-reserved and deferred.
+The full rail map, pins, registers and what was read off a real unit are in
+[docs/hardware.md](docs/hardware.md). Bring-up found six board-level traps, each fixed and
+written down in [docs/firmware.md](docs/firmware.md#what-bring-up-found) — among them an IMU
+register that locks its SPI port until power-off if written whole, and an I²C scan that wedges
+the magnetometer. What eight other firmware projects for this board taught, and what their
+licences let us take, is [docs/prior-art.md](docs/prior-art.md).
 
 ## Where it is going
 
-The schedule lives in the one Cairn roadmap, as phases **T1–T8**:
-[ROADMAP.md — the trail device](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
-In short: bring-up, then the capture core on the S3, then enrolment and the first hike on the
-dashboard, then activities, battery life, the ways home, and chip hardening (the LoRa phase is
-deferred). **T1, bring-up, is done but for a fix under open sky and the meter readings**: every
-part has been read off the real unit ([docs/hardware.md](docs/hardware.md)), and v0.1.0 logs all of
-it. Next is T2: the sealed `format/v3` record in place of the CSV files.
+Cairn keeps one roadmap, in the front door: the trail device is phases
+[T1–T8](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
+
+- **T1 — bring-up.** Done, but for a fix under open sky and current measurements with a meter.
+- **T2 — the sealed record.** `format/v3` bundles from `cairn-format`, the Rust implementation
+  shared with the dongle's emulator, in place of the CSV files.
+- **T3–T6.** Enrolment and the first hike on the dashboard; hike/walk/drive detection; battery
+  life (receiver power save, cutting rails in sleep); Bluetooth offload through the phone and
+  Wi-Fi uplink at home.
+- **T8.** Secure boot and flash encryption — this chip supports them, unlike the dongle's — on a
+  sacrificial second board first. (T7, LoRa, is deferred: the radio stays off.)
+
+How the device fits Cairn — a *person* carrier instead of a car, `format/v3` unchanged, the same
+server — is designed in
+[docs/trail-device-plan.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md).
+
+## Building and releasing
+
+Everything runs locally: there is no hosted CI for this repository.
+
+```sh
+espup install --targets esp32s3   # once: Espressif's Xtensa Rust toolchain
+cargo install espflash --locked   # once (rustc ≥ 1.95)
+. ~/export-esp.sh
+
+scripts/ci.sh                     # format, clippy (both flavours), host tests, both builds,
+                                  # merged images + SHA256SUMS in dist/
+scripts/flash.sh verbose          # debug build: every record echoed, diagnostics, screen always on
+scripts/flash.sh release          # the quiet build
+scripts/release.sh v0.1.0 docs/releases/v0.1.0.md   # clean tree only: CI, tag, GitHub release
+```
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| [`docs/hardware.md`](docs/hardware.md) | The board: parts, the AXP2101 rail map from the schematics, pins, chip identities, the PMU registers the driver needs, what shapes the firmware, and what has been read off the real unit |
-| [`docs/prior-art.md`](docs/prior-art.md) | What eight other firmware projects for this board taught — power, the M10, time, storage, elevation, UX, and their bugs — with each source's licence and what may be taken from it |
-| [`docs/bringup.md`](docs/bringup.md) | The staged bring-up procedure, starting with a full backup of the stock image |
-| [`docs/firmware.md`](docs/firmware.md) | v0.1: building, flashing, the console, the files on the card and their columns, how it was verified, and what is not yet proven |
-| [`firmware/`](firmware/) | The firmware: Rust on `esp-hal` + Embassy for the ESP32-S3 (`espup` toolchain). `verbose` feature for the debug build |
-| [`crates/trail-core/`](crates/trail-core/) | Host-tested logic with no hardware in it: the UBX parser and builders, BME280 compensation, elevation fusion and climb, battery curve, RTC, GPT reading |
-| [`scripts/`](scripts/) | Local CI/CD: `ci.sh` (format, clippy, tests, both builds, merged images), `flash.sh`, `release.sh`; `console.py` (capture, commands, pull files with CRC check) and `verify.py` (check a pulled session) |
-| [`evidence/`](evidence/) | Logs from the real board, dated |
-| [`contracts.lock`](contracts.lock) | The contract release this repository is built against |
-| [`LICENSE`](LICENSE) | Blue Oak Model License 1.0.0 |
-
-`cairn-format`, the shared `format/v3` crate from the dongle repository's emulator, arrives with
-T2.
+| [`firmware/`](firmware/) | The firmware (`no_std`, Xtensa). `verbose` feature for the debug build |
+| [`crates/trail-core/`](crates/trail-core/) | Host-tested logic, no hardware: UBX parser and builders, BME280 compensation, elevation fusion and climb, battery curve, RTC, GPT reading |
+| [`scripts/`](scripts/) | `ci.sh`, `flash.sh`, `release.sh`; `console.py` (capture, commands, CRC-checked pulls); `verify.py` (check a session) |
+| [`docs/firmware.md`](docs/firmware.md) | The manual: columns, console, flashing, SD cards, verification, bring-up findings |
+| [`docs/hardware.md`](docs/hardware.md) | The board, from schematics and from the real unit |
+| [`docs/prior-art.md`](docs/prior-art.md) | Lessons from other firmware for this board, and their licences |
+| [`docs/bringup.md`](docs/bringup.md) | The staged bring-up procedure |
+| [`docs/releases/`](docs/releases/) | Release notes |
+| [`evidence/`](evidence/) | Logs and verification output from the real board |
+| [`contracts.lock`](contracts.lock) | The Cairn contract release this repository builds against |
 
 ## Contributing
 
 - Commit as the project's configured identity; the global identity guard blocks anything else.
+- Run `scripts/ci.sh` before pushing. A release is cut only from a clean tree by
+  `scripts/release.sh`.
+- Claim *Proven* only with evidence from the board: add the log to `evidence/`.
 - A change that needs a contract change starts in the
-  [front door](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts),
-  not here.
-- A fix to `cairn-format` goes to the emulator workspace in the dongle's repository first, and
-  arrives here by bumping the revision.
-- Pin exact versions of the `esp-*` crates in `Cargo.lock`; `esp-radio` is `unstable` and changes
-  between minor releases.
-- **Do not add a roadmap here.** Cairn keeps exactly one, in the front door. This README says what
-  the device is and what it has running; the plan and the ordering live in
-  [ROADMAP.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md).
+  [front door](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts).
+- Only MIT/Apache/BSD-licensed code may be ported (see [docs/prior-art.md](docs/prior-art.md));
+  Meshtastic, SoftRF and the other GPL projects are read for facts only.
+- **Do not add a roadmap here.** Cairn keeps exactly one, in the
+  [front door](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md).
 
 ## License
 
-[Blue Oak Model License 1.0.0](LICENSE).
+[Blue Oak Model License 1.0.0](LICENSE). The AXP2101, QMI8658, QMC6309/6310 and PCF8563 register
+facts come from Lewis He's MIT-licensed XPowersLib and SensorLib.
