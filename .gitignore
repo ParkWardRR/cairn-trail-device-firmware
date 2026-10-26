@@ -1,0 +1,13 @@
+.DS_Store
+.claude/
+.nimbalyst/
+
+# Fetched contracts (scripts/fetch-contracts.sh, once it exists)
+/.contracts/
+
+# Local credentials: never commit
+include/secrets.h
+
+# Build output
+.pio/
+/build/
