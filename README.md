@@ -5,7 +5,7 @@
 |---|---|---|---|---|---|---|
 | Front door | [cairn-driving-log-selfhosted](https://github.com/ParkWardRR/cairn-driving-log-selfhosted) | Docs, roadmap, shared protocol contracts | Markdown · Go tools | [docs](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/issues) | [CI](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/actions) |
 | Dongle | [cairn-esp32-device-firmware](https://github.com/ParkWardRR/cairn-esp32-device-firmware) | In-car recorder: OBD-II, GNSS, IMU to encrypted SD bundles | C++ · C · Rust | [docs](https://github.com/ParkWardRR/cairn-esp32-device-firmware/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues) | [CI](https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions) |
-| Trail device | **[cairn-trail-device-firmware](https://github.com/ParkWardRR/cairn-trail-device-firmware)** ◀ you are here | Handheld recorder for hiking, walking and driving without the dongle | C++ · C | [docs](https://github.com/ParkWardRR/cairn-trail-device-firmware/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-trail-device-firmware/issues) | [CI](https://github.com/ParkWardRR/cairn-trail-device-firmware/actions) |
+| Trail device | **[cairn-trail-device-firmware](https://github.com/ParkWardRR/cairn-trail-device-firmware)** ◀ you are here | Handheld recorder for hiking, walking and driving without the dongle | Rust · esp-hal · Embassy | [docs](https://github.com/ParkWardRR/cairn-trail-device-firmware/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-trail-device-firmware/issues) | [CI](https://github.com/ParkWardRR/cairn-trail-device-firmware/actions) |
 | Phone | [cairn-ios-companion-app](https://github.com/ParkWardRR/cairn-ios-companion-app) | BLE relay, GPS assist, server client | Swift · SwiftUI | [docs](https://github.com/ParkWardRR/cairn-ios-companion-app/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-ios-companion-app/issues) | [CI](https://github.com/ParkWardRR/cairn-ios-companion-app/actions) |
 | Server | [cairn-vehicle-server](https://github.com/ParkWardRR/cairn-vehicle-server) | Verifies, decrypts, stores; serves app and dashboard | Go | [docs](https://github.com/ParkWardRR/cairn-vehicle-server/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-vehicle-server/issues) | [CI](https://github.com/ParkWardRR/cairn-vehicle-server/actions) |
 | Dashboard | [cairn-vehicle-web-dashboard](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard) | Browser UI: trips, places, engine, health | Nuxt · TypeScript | [docs](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/issues) | [CI](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/actions) |
@@ -19,6 +19,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Blue_Oak_1.0.0-2E86C1?style=flat-square" alt="Blue Oak Model License 1.0.0"></a>
   <img src="https://img.shields.io/badge/target-ESP32--S3_·_LILYGO_T--Beam_Supreme-2E86C1?style=flat-square" alt="ESP32-S3, LILYGO T-Beam Supreme">
+  <img src="https://img.shields.io/badge/firmware-Rust_·_esp--hal_·_Embassy-2E86C1?style=flat-square" alt="Rust, esp-hal, Embassy">
   <img src="https://img.shields.io/badge/contracts-v0.8.0-2E86C1?style=flat-square" alt="contracts-v0.8.0">
   <img src="https://img.shields.io/badge/status-designed,_nothing_built-E67E22?style=flat-square" alt="Designed, nothing built">
 </p>
@@ -55,6 +56,7 @@ its card only on a receipt it has verified itself.
 [What it is](#what-the-trail-device-is-and-is-not) ·
 [Hardware](#hardware) ·
 [How it fits Cairn](#how-it-fits-cairn) ·
+[Firmware stack](#firmware-stack-rust-esp-hal-embassy) ·
 [Activities](#activities-hike-walk-drive) ·
 [What it records](#what-it-records) ·
 [Display and buttons](#display-and-buttons) ·
@@ -121,10 +123,10 @@ cars:
 | The GNSS plausibility gate | Re-tuned for walking speeds, with the pedometer as the cross-check OBD speed was in the car |
 | Signed OTA with a separate update key | The same design on the S3's A/B partitions |
 
-**The dongle's portable C libraries are vendored, not forked.** They come from one pinned commit
-of [cairn-esp32-device-firmware](https://github.com/ParkWardRR/cairn-esp32-device-firmware),
-recorded in a `core.lock` beside `contracts.lock`, and are never edited here: a fix goes to the
-dongle and arrives by bumping the pin.
+**What carries over is design, contracts and vectors — not the dongle's C.** This firmware is
+Rust. The one piece of code it shares is `format/v3`: the dongle repository's emulator is already
+a Rust implementation of it, and it is extracted into a `no_std` crate, `cairn-format`, that the
+emulator and this firmware both depend on, pinned by git revision.
 
 **Who carries it.** Every v3 bundle names the vehicle its device is assigned to, and intake checks
 that before it decrypts anything. The planned answer is a *carrier*: the server's vehicle registry
@@ -136,6 +138,30 @@ trip where one overlaps.
 The full design, with its alternatives and open decisions, is
 [docs/trail-device-plan.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md)
 in the front door.
+
+## Firmware stack: Rust, esp-hal, Embassy
+
+The owner's choice (2026-10-25). The full crate map and its reasoning are in
+[§3.1 of the plan](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md#31-the-firmware-stack-rust-esp-hal-embassy).
+
+| Layer | Crates |
+|---|---|
+| HAL and runtime | `esp-hal` 1.x; Embassy (`embassy-executor`, `embassy-time`, `embassy-sync`) through `esp-rtos`; `esp-alloc` on the PSRAM |
+| Radio | `esp-radio` for Wi-Fi and the BLE controller; `trouble-host` for the BLE host and the `ble/v1` GATT service; `embassy-net` for `uplink/v1`; `lora-phy` for the SX1262 |
+| Storage | the card through `embedded-fatfs` or `embedded-sdmmc` (chosen in T2 — sealing needs an atomic rename); keys and the device counter in flash through `esp-storage` + `sequential-storage`; partitions and OTA through `esp-bootloader-esp-idf` |
+| Sensors and display | `ublox` (UBX-NAV-PVT), `bme280`, `sh1106` + `embedded-graphics`; **drivers written here** for the AXP2101, QMI8658, QMC6310/6309 and PCF8563 |
+| Bundles and crypto | `cairn-format` (shared with the emulator); RustCrypto `chacha20poly1305`, `hkdf`, `sha2`, `ed25519-dalek`, `x25519-dalek`; `esp-hal`'s TRNG |
+| Logs | `defmt` over USB-Serial-JTAG |
+
+**One task owns each bus** and reports facts over channels to **one capture controller that owns
+all state** — the dongle's rule, which Embassy makes the natural shape. The SD card and the IMU
+share an SPI bus behind `embassy-embedded-hal`'s shared-bus mutex, so the dongle's unlocked-bus
+failure cannot be written by accident.
+
+The S3 is Xtensa, so the toolchain is Espressif's fork, installed with
+[`espup`](https://github.com/esp-rs/espup); [`espflash`](https://github.com/esp-rs/espflash)
+flashes and monitors. The logic crates are `no_std` and test on stable Rust on the host, where the
+contract vectors are replayed.
 
 ## Activities: hike, walk, drive
 
@@ -276,8 +302,10 @@ into [docs/hardware.md](docs/hardware.md).
 | [`contracts.lock`](contracts.lock) | The contract release this repository is built against |
 | [`LICENSE`](LICENSE) | Blue Oak Model License 1.0.0 |
 
-The firmware tree — `platformio.ini`, `src/`, `third_party/cairn-core/` with its `core.lock`, and
-the host and on-device tests — arrives with T1 and T2.
+The firmware tree arrives with T1 and T2: a Cargo workspace with the firmware binary (Xtensa,
+`esp-hal` + Embassy), the board's drivers, the host-testable logic crates, a `rust-toolchain.toml`
+naming the `esp` channel, `.cargo/config.toml` for `espflash`, and `cairn-format` taken by git
+revision from the dongle repository.
 
 ## Contributing
 
@@ -285,7 +313,10 @@ the host and on-device tests — arrives with T1 and T2.
 - A change that needs a contract change starts in the
   [front door](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts),
   not here.
-- A fix to a vendored dongle library goes to the dongle's repository first.
+- A fix to `cairn-format` goes to the emulator workspace in the dongle's repository first, and
+  arrives here by bumping the revision.
+- Pin exact versions of the `esp-*` crates in `Cargo.lock`; `esp-radio` is `unstable` and changes
+  between minor releases.
 - **Do not add a roadmap here.** Cairn keeps exactly one, in the front door. This README says what
   the device is and what it has running; the plan and the ordering live in
   [ROADMAP.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md).
