@@ -41,8 +41,6 @@ flowchart LR
     you["You, on foot<br/>(or in a car with no dongle)"] --> trail["<b>Trail device</b><br/>(this repository)"]
     trail -- "BLE: sealed bundles" --> phone["iPhone app<br/>cairn-ios-companion-app"]
     trail -- "Wi-Fi at home: sealed bundles" --> server["Your server<br/>cairn-vehicle-server"]
-    trail -. "LoRa: last-seen beacon<br/>(optional, never a record)" .-> gw["Home LoRa gateway"]
-    gw -.-> server
     phone -- "authenticated upload" --> server
     server --> web["Web dashboard<br/>cairn-vehicle-web-dashboard"]
     server -. "signed receipt" .-> phone
@@ -62,7 +60,7 @@ its card only on a receipt it has verified itself.
 [Display and buttons](#display-and-buttons) ·
 [Power](#power) ·
 [Getting recordings home](#getting-recordings-home) ·
-[LoRa](#lora) ·
+[LoRa: off](#lora-off) ·
 [Security](#security-posture) ·
 [Contracts](#contracts) ·
 [Where it is going](#where-it-is-going) ·
@@ -81,11 +79,10 @@ hike exactly as they treat a drive, apart from what it means.
 - **an OBD-II logger.** It has no vehicle bus. In a car it records a GNSS and motion track and
   nothing about the engine. If the car's dongle recorded the same window, the server lays the two
   side by side; the two devices never talk to each other.
-- **an emergency device.** The LoRa radio can make it *findable*, best effort. It is not a
-  personal locator beacon and has no satellite link, and nothing here will claim it can summon
-  help.
-- **Meshtastic.** The board ships as a Meshtastic node; this firmware replaces that. Whether it
-  will ever speak the Meshtastic protocol is an open decision (see [LoRa](#lora)).
+- **an emergency device.** It is not a personal locator beacon, it has no satellite link, and
+  nothing here will claim it can summon help.
+- **a LoRa device.** The board ships as a Meshtastic node; this firmware replaces that and keeps
+  the LoRa radio **off** ([LoRa](#lora-off)).
 
 ## Hardware
 
@@ -98,7 +95,7 @@ part off the real unit.
 |---|---|---|
 | MCU | ESP32-S3FN8, 8 MB flash, 8 MB PSRAM | Everything; Wi-Fi and BLE 5 |
 | GNSS | u-blox MAX-M10S, four constellations | Position, read as UBX-NAV-PVT so accuracy is the receiver's own estimate |
-| LoRa | Semtech SX1262, 915 MHz | Optional *last seen* beacons only |
+| LoRa | Semtech SX1262, 915 MHz | **Nothing.** Held off from boot to save battery |
 | Display | SH1106 OLED, 128×64 | Status, the activity, a bearing back to the start |
 | IMU | QMI8658, 6-axis | Steps, cadence, motion, wake-on-motion |
 | Compass | QMC6310 / QMC6309 | Heading when standing still |
@@ -147,7 +144,7 @@ The owner's choice (2026-10-25). The full crate map and its reasoning are in
 | Layer | Crates |
 |---|---|
 | HAL and runtime | `esp-hal` 1.x; Embassy (`embassy-executor`, `embassy-time`, `embassy-sync`) through `esp-rtos`; `esp-alloc` on the PSRAM |
-| Radio | `esp-radio` for Wi-Fi and the BLE controller; `trouble-host` for the BLE host and the `ble/v1` GATT service; `embassy-net` for `uplink/v1`; `lora-phy` for the SX1262 |
+| Radio | `esp-radio` for Wi-Fi and the BLE controller; `trouble-host` for the BLE host and the `ble/v1` GATT service; `embassy-net` for `uplink/v1`. No LoRa stack |
 | Storage | the card through `embedded-fatfs` or `embedded-sdmmc` (chosen in T2 — sealing needs an atomic rename); keys and the device counter in flash through `esp-storage` + `sequential-storage`; partitions and OTA through `esp-bootloader-esp-idf` |
 | Sensors and display | `ublox` (UBX-NAV-PVT), `bme280`, `sh1106` + `embedded-graphics`; **drivers written here** for the AXP2101, QMI8658, QMC6310/6309 and PCF8563 |
 | Bundles and crypto | `cairn-format` (shared with the emulator); RustCrypto `chacha20poly1305`, `hkdf`, `sha2`, `ed25519-dalek`, `x25519-dalek`; `esp-hal`'s TRNG |
@@ -226,7 +223,11 @@ confirm.
 
 **Targets, unmeasured:** at least **24 hours** of 1 Hz on-foot recording on one 3000 mAh 18650 with
 the screen mostly off, and at least **5 days** in endurance mode. The real numbers will come from a
-meter, not a datasheet.
+meter, not a datasheet. Two figures from other firmware set expectations
+([prior-art.md](docs/prior-art.md#1-power-and-the-lora-radio)): SoftRF quotes about **105 mA** for
+the whole board with the M10 tracking — under 29 hours on that cell before anything else draws — so
+receiver power save is required, not optional; and LilyGO measures about **1.45 mA** in deep sleep
+on this board, so endurance mode saves power by cutting rails, not just by sleeping the CPU.
 
 A low cell **seals, it does not truncate**: at a PMU threshold the open bundle is sealed and
 recording stops, with enough left for the clock and a later boot. The IMU's interrupt line cannot
@@ -245,52 +246,25 @@ be confirmed on the board.
 
 There is no cellular modem on this board.
 
-## LoRa
+## LoRa: off
 
-Optional, **off by default**, and shown on the screen when on. A small sealed beacon lets someone
-at home see where the device was last heard. A beacon is **provisional**: it is never stored as a
-position, never joined into an activity, and can never authorise deleting anything. The wire
-format is reserved as
-[`beacon/v1`](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts/beacon/v1)
-and will not be designed until the threat model covers broadcasting a location. US 915 MHz ISM
-and FCC Part 15 limits set the beacon interval. Speaking the Meshtastic protocol is an open
-decision: Meshtastic and its protocol definitions are GPLv3, and this project is Blue Oak.
+**The owner's decision, 2026-10-25: the LoRa radio is not used for anything, and is held off to
+save battery.** At every boot, before anything else, the firmware disables the radio's PMU rail if
+it has one of its own, or sends the SX1262 its sleep command if it shares a rail — an SX1262 left
+in its power-on standby draws on the order of half a milliamp all day. Bring-up measures the
+board's current with the radio held off. There is no LoRa crate, task or traffic beyond that one
+command. Leave the antenna fitted anyway.
 
-## Security posture
-
-Inherited: every frame AEAD-encrypted, so the card is a cache of ciphertext; the device root
-escrowed at enrolment; deletion only on a receipt verified on the device; signed OTA.
-
-Better than the dongle: **the ESP32-S3 supports Secure Boot V2 and flash encryption**, which the
-dongle's rev v1.0 chip cannot. This is the first Cairn hardware on which the front door's chip
-hardening phase can run — on a sacrificial second unit first, never straight onto the one in use.
-
-Worse than the dongle: **it is carried, so it will be lost.** Revoking a lost device has to work
-before the device is used for real.
-
-## Contracts
-
-Pinned in [`contracts.lock`](contracts.lock) to **`contracts-v0.8.0`** (`412a5ee`):
-
-| Protocol | Use |
-|---|---|
-| `format/v3` | Writes bundles |
-| `enrolment/v1` | Produces the sealed enrolment blob, speaks the USB console protocol |
-| `ble/v1` | Serves bundle offload and device info |
-| `uplink/v1` | Wi-Fi upload, once built |
-
-The additions this device needs — the record types above, a device-class record in `ble/v1`
-device info, the carrier `kind`, activity views in the store — are listed in
-[§11 of the plan](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md#11-contract-changes)
-and land in the front door through the normal contract process before any code here depends on
-them.
+The earlier *last seen* beacon design stays recorded in
+[`beacon/v1`](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts/beacon/v1),
+reserved and deferred.
 
 ## Where it is going
 
 The schedule lives in the one Cairn roadmap, as phases **T1–T8**:
 [ROADMAP.md — the trail device](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
 In short: bring-up, then the capture core on the S3, then enrolment and the first hike on the
-dashboard, then activities, battery life, the ways home, LoRa, and chip hardening. The next step is
+dashboard, then activities, battery life, the ways home, and chip hardening (the LoRa phase is deferred). The next step is
 **T1, bring-up**: power the board, enable the PMU rails, and read every part off the real unit
 into [docs/hardware.md](docs/hardware.md).
 
@@ -298,7 +272,9 @@ into [docs/hardware.md](docs/hardware.md).
 
 | Path | What |
 |---|---|
-| [`docs/hardware.md`](docs/hardware.md) | The board: parts, pins, I²C addresses, what shapes the firmware, and what has been read off a real unit |
+| [`docs/hardware.md`](docs/hardware.md) | The board: parts, the AXP2101 rail map from the schematics, pins, chip identities, the PMU registers the driver needs, what shapes the firmware, and what has been read off the real unit |
+| [`docs/prior-art.md`](docs/prior-art.md) | What eight other firmware projects for this board taught — power, the M10, time, storage, elevation, UX, and their bugs — with each source's licence and what may be taken from it |
+| [`docs/bringup.md`](docs/bringup.md) | The staged bring-up procedure, starting with a full backup of the stock image |
 | [`contracts.lock`](contracts.lock) | The contract release this repository is built against |
 | [`LICENSE`](LICENSE) | Blue Oak Model License 1.0.0 |
 
