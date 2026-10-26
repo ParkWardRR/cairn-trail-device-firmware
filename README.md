@@ -150,6 +150,7 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 | `prime` | What the GPS will be told at power-on (see below) |
 | `gnss cold` | Make the GPS forget everything, to time a cold start |
 | `vectors` | Check Cairn's bundle format on the board against its conformance vectors |
+| `bundle` · `bundle seal` | The sealed Cairn bundle being written; seal it now (`trail bundle pull` / `verify`) |
 | `wifi scan` · `wifi locate` · `wifi learn <lat> <lon>` · `wifi forget` | Wi-Fi fingerprints (see below) |
 | `flush` · `mark` · `reboot` | |
 
@@ -231,6 +232,7 @@ left recording, every file was pulled back with matching checksums, and the sess
 | AssistNow: registered, downloaded, uploaded over USB, 109 of 109 messages accepted | |
 | Priming a cold GPS with the time; leaving a GPS that kept its memory alone | |
 | Wi-Fi fingerprints: scan, learn, match, and a Wi-Fi position planned at boot (with a hand-given position) | Learning fingerprints from real GPS fixes |
+| Cairn `format/v3` bundles sealed on the board, accepted by the server's verifier (signature included), recovered after power cuts | A bundle from a walk with a fix |
 
 ## Under the hood
 

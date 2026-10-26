@@ -129,6 +129,8 @@ pub struct Status {
     pub fix_ok: bool,
     pub num_sv: u8,
     pub sats_visible: u8,
+    /// Constellations with a satellite in the fix (GNSS_SAMPLE source_flags).
+    pub used_sources: u8,
     pub lat_e7: i32,
     pub lon_e7: i32,
     pub hmsl_mm: i32,
@@ -221,6 +223,7 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         fix_ok: false,
         num_sv: 0,
         sats_visible: 0,
+        used_sources: 0,
         lat_e7: 0,
         lon_e7: 0,
         hmsl_mm: 0,
@@ -305,6 +308,17 @@ pub enum StorageCmd {
     WifiLearn(trail_core::wififp::Fingerprint),
     /// Empty WIFIFP.CSV.
     WifiForget,
+    /// A binary file as hex (`catx B0000001/S0000000.SEG`).
+    CatHex(String<40>),
+    Bundle(BundleCmd),
+}
+
+/// `bundle` on the console.
+pub enum BundleCmd {
+    /// The open bundle, the counter and the device's public key.
+    Show,
+    /// Seal the open bundle now and open the next.
+    Seal,
 }
 
 pub static STORAGE_CMDS: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
@@ -337,6 +351,23 @@ pub static GNSS_CMD: Channel<CriticalSectionRawMutex, AssistFrame, 2> = Channel:
 /// and before any AssistNow data.
 pub static PRIME_FRAMES: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<AssistFrame, 2>>> =
     Mutex::new(RefCell::new(heapless::Vec::new()));
+
+/// One NAV-PVT epoch for the bundle writer (`bundle.rs`), which turns it into
+/// a `GNSS_SAMPLE`, a `GNSS_GAP` or a `TIME_OBSERVATION`.
+#[derive(Clone, Copy)]
+pub struct GnssEpoch {
+    /// Uptime at the epoch.
+    pub t_ms: u64,
+    /// A position worth recording (`NavPvt::has_position`).
+    pub fix: bool,
+    pub sample: trail_core::records::GnssSample,
+    /// UTC of the epoch, when date and time are valid and fully resolved.
+    pub utc_ms: Option<u64>,
+    /// The receiver's time accuracy, ns (`u32::MAX` if not stated).
+    pub t_acc_ns: u32,
+}
+
+pub static BUNDLE_GNSS: Channel<CriticalSectionRawMutex, GnssEpoch, 4> = Channel::new();
 
 /// A Wi-Fi scan: the strongest fixed access points heard, strongest first
 /// (`trail_core::wififp::select`), and the uptime it finished at.

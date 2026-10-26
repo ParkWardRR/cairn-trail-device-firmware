@@ -10,3 +10,4 @@ publish = false
 libm = "0.2.16"
 
 [dev-dependencies]
+cairn-format = { git = "https://github.com/ParkWardRR/cairn-esp32-device-firmware", rev = "f8bd78e4f93a566d01050b30e826401784517649" }

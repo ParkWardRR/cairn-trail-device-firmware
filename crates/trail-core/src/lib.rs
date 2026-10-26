@@ -5,9 +5,11 @@
 
 pub mod battery;
 pub mod bme280;
+pub mod counter;
 pub mod elevation;
 pub mod gpt;
 pub mod pcf8563;
 pub mod prime;
+pub mod records;
 pub mod ubx;
 pub mod wififp;

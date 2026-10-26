@@ -9,8 +9,10 @@
     holding buffers for the duration of a data transfer."
 )]
 
+mod bundle;
 mod display;
 mod gnss;
+mod ident;
 mod imu;
 mod keys;
 mod net;
@@ -69,6 +71,11 @@ static LOGGER: Logger = Logger;
 static GNSS_EXECUTOR: StaticCell<InterruptExecutor<2>> = StaticCell::new();
 static MAC_COPY: critical_section::Mutex<core::cell::Cell<[u8; 6]>> =
     critical_section::Mutex::new(core::cell::Cell::new([0; 6]));
+
+/// The Wi-Fi MAC as read at boot.
+pub fn mac_bytes() -> [u8; 6] {
+    critical_section::with(|cs| MAC_COPY.borrow(cs).get())
+}
 
 pub fn mac_string() -> String<18> {
     let m = critical_section::with(|cs| MAC_COPY.borrow(cs).get());

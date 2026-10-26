@@ -218,12 +218,70 @@ sent. After `trail prime`, the RTC read true, and a `gnss cold` + reboot gave a 
 time and priming correctly sent nothing. Position priming and the effect on time to first fix
 need open sky.
 
-## Cairn's bundle format on the board (T2, in progress)
+## Cairn's bundle format on the board (T2)
 
-The logger is gaining Cairn's sealed `format/v3` bundles beside its CSV files. The format is not
+Beside its CSV files, the logger writes Cairn's sealed **`format/v3` bundles** — the same bytes
+the dongle uploads, so a Cairn server reads them as one more device. The format is not
 reimplemented here: the firmware builds **`cairn-format`**, the Rust implementation in the dongle
 repository's emulator workspace (`emulator/cairn-format`, `no_std` + `alloc`), pinned by commit in
 `firmware/Cargo.toml` — one Rust implementation for the emulator and this device.
+
+### What a bundle holds
+
+| Record | When |
+|---|---|
+| `GNSS_SAMPLE` | Every epoch with a fix: position, ellipsoid height, speed, heading, accuracies, satellites, constellations used, UTC offset. HDOP is written as unknown (NAV-PVT has PDOP only) — quality fields are never synthesised |
+| `GNSS_GAP` | Every stretch of 2 s or more without a fix, once the fix returns or the bundle closes — never a run of empty samples |
+| `IMU_SUMMARY` | Once a second: RMS and signed peak acceleration, peak rotation, variance, sample count (50) |
+| `DEVICE_HEALTH` | Once a minute: supply (cell, or USB with no cell), card write errors, temperature |
+| `TIME_OBSERVATION` | The RTC once it has been checked (source 4), GNSS at the first fix and every 10 minutes (source 1). The first is **adopted as `utc_basis_ms`**, so a bundle is dated even with no fix |
+| `STATE_TRANSITION` | In the journal: opened, then sealed (or sealed at boot after a cut) |
+
+A bundle is sealed when the session stops (`stop`, `reboot`), every 30 minutes, or on `bundle
+seal`; a bundle a power cut left open is sealed at the next boot from the bytes on the card alone.
+Segments roll at 32 KB; transfer chunks are 8 KiB.
+
+### Keys and the counter
+
+- **Identity**, generated on the board from the TRNG the first time a bundle opens and written
+  once to the `cairn` partition (0x14000): the Ed25519 signing seed and the storage root every
+  segment key is derived from. It never leaves the device except by enrolment (T3), which escrows
+  the storage root with the server. `bundle` prints the public key.
+- **`device_counter`**, starting at 1, written to flash *before* it is used, in an append-only log
+  across two sectors (0x16000) where the sector holding the current value is never the one erased
+  (`trail_core::counter`, host-tested with power cuts at every step and a mutation that erases the
+  wrong sector caught). A cut can skip a counter; it can never repeat one.
+- Until enrolment the vehicle and assignment ids are zero: bundles verify structurally and by
+  signature, but no server will take them into a trip until the device is enrolled and assigned.
+
+### On the card
+
+The FAT library here writes 8.3 names only and cannot rename, so the card's layout differs from
+the spec's §2 — the bundle's bytes and manifest do not:
+
+| Spec (§2) | On this card |
+|---|---|
+| `<bundle_id>.open` → `.sealed` | `B0000001` (the counter in hex); sealed once `MANIFEST.SIG` exists; `EMPTY` if no frame reached the card |
+| `seg-00000000.seg`, `journal.seg` | `S0000000.SEG`, `JOURNAL.SEG` |
+| `manifest.cbor`, `manifest.sig` | `MANIFEST.CBO`, `MANIFEST.SIG` (written last, so its presence means the manifest is whole) |
+
+```sh
+trail console --cmd bundle                     # the open bundle, counter, device public key
+trail console --cmd "bundle seal"              # seal now, open the next
+trail bundle pull B0000008 --out bundles/      # over USB (catx: hex + CRC-32), canonical names
+trail bundle verify bundles/<bundle_id>        # the server's cairn-verify, device key from the board
+```
+
+**Verified on the board, 2026-10-26** (indoors, so no `GNSS_SAMPLE` yet): bundles sealed on the
+ESP32-S3 and pulled over USB pass the Cairn server's `cairn-verify` on every check — canonical
+CBOR re-encoding byte for byte, every member's length and digest, the content root, the chunk
+cover, the seq range, the record counts, and **the manifest signature against the device's key**.
+`B0000008`: 81 frames, dated from the checked RTC (`utc_basis_ms` ±6 s). Power cuts (a hard reset
+mid-bundle, three times): the open bundle was sealed at the next boot and verified (`B0000002`,
+105 frames; `B0000006`, 10 frames); one cut before its first flush was marked `EMPTY`. Not yet:
+a walk with a fix — the T2 bar — and so `GNSS_SAMPLE` from the board.
+
+### Checked against the vectors
 
 - **On the host**, `scripts/ci.sh` checks out the dongle repository at that commit and runs its
   conformance runner: every `format/v3` vector (62 at `contracts-v0.9.0`).
@@ -235,8 +293,13 @@ repository's emulator workspace (`emulator/cairn-format`, `no_std` + `alloc`), p
 
 **Verified on the board, 2026-10-26:** `vectors: 3/3 pass on the ESP32-S3 in 122 ms`. With two
 expectations deliberately broken the board reported both failures (`1/3`), so the check can fail.
-The firmware grew from 887 KB to 1.07 MB with the format's crypto linked in. Sealing sessions into
-bundles is next.
+The firmware grew from 887 KB to 1.07 MB with the format's crypto linked in.
+
+The records the logger encodes (`trail_core::records`) are checked the same way: the host tests
+decrypt vector segments with `cairn-format` and require every `GNSS_SAMPLE`, `GNSS_GAP`,
+`DEVICE_HEALTH`, `TIME_OBSERVATION` and `STATE_TRANSITION` payload to decode and re-encode byte
+for byte. No vector carries a real `IMU_SUMMARY` (`valid-minimal` has a zero placeholder), so that
+layout is checked against the spec table field by field.
 
 ## SD cards
 

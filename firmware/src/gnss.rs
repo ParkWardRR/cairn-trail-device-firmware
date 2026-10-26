@@ -235,6 +235,56 @@ fn handle_pvt(p: &[u8]) -> Option<u8> {
             pvt.invalid_llh() as u8,
         ),
     );
+    // For the sealed bundle: the same epoch as a GNSS_SAMPLE, quality fields
+    // as the receiver reported them and never synthesised (format/v3 §4.1).
+    // NAV-PVT carries PDOP, not HDOP, so hdop is written as unknown.
+    {
+        use trail_core::records::{GnssSample, UNKNOWN_U16, cm_u16};
+        let st = crate::shared::status();
+        let utc_ms = pvt.time_resolved().then(|| {
+            let t = DateTime {
+                year: pvt.year,
+                month: pvt.month,
+                day: pvt.day,
+                hour: pvt.hour,
+                min: pvt.min,
+                sec: pvt.sec,
+            };
+            (trail_core::pcf8563::unix_seconds(&t) * 1000 + (pvt.nano / 1_000_000) as i64) as u64
+        });
+        let fix_type = match pvt.fix_type {
+            2 => 1,
+            3 | 4 => 2,
+            _ => 0,
+        };
+        let sample = if has_pos {
+            GnssSample {
+                lat_e7: pvt.lat_e7,
+                lon_e7: pvt.lon_e7,
+                alt_cm: pvt.height_mm / 10,
+                speed_cmps: (pvt.g_speed_mms.max(0) / 10).min(u16::MAX as i32) as u16,
+                heading_cdeg: ((pvt.head_mot_e5.rem_euclid(36_000_000)) / 1000) as u16,
+                hdop_e2: UNKNOWN_U16,
+                h_acc_cm: cm_u16(pvt.h_acc_mm),
+                v_acc_cm: cm_u16(pvt.v_acc_mm),
+                fix_type,
+                sats_used: pvt.num_sv,
+                sats_visible: st.sats_visible,
+                source_flags: st.used_sources,
+                utc_offset_ms: 0, // set by the bundle writer against its basis
+                utc_acc_ms: UNKNOWN_U16,
+            }
+        } else {
+            GnssSample::default()
+        };
+        let _ = crate::shared::BUNDLE_GNSS.try_send(crate::shared::GnssEpoch {
+            t_ms: crate::shared::now_ms(),
+            fix: has_pos,
+            sample,
+            utc_ms,
+            t_acc_ns: pvt.t_acc_ns,
+        });
+    }
     let was_fix = crate::shared::status().fix_ok;
     with_status(|s| {
         s.gnss_seen = true;
@@ -372,10 +422,19 @@ fn handle_sat(p: &[u8]) {
         return;
     };
     let mut used = 0u8;
+    // GNSS_SAMPLE source_flags: bit 0 GPS, 1 GLONASS, 2 Galileo, 3 BeiDou.
+    let mut sources = 0u8;
     for i in 0..n as usize {
         if let Some(s) = ubx::nav_sat(p, i) {
             if s.used() {
                 used += 1;
+                sources |= match s.gnss_id {
+                    0 => 1,
+                    6 => 2,
+                    2 => 4,
+                    3 => 8,
+                    _ => 0,
+                };
             }
             emit(
                 Stream::Sat,
@@ -395,7 +454,10 @@ fn handle_sat(p: &[u8]) {
             );
         }
     }
-    with_status(|s| s.sats_visible = n);
+    with_status(|s| {
+        s.sats_visible = n;
+        s.used_sources = sources;
+    });
     log::debug!("NAV-SAT: {} visible, {} used", n, used);
 }
 

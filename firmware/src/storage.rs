@@ -30,7 +30,7 @@ use heapless::String;
 use crate::imu::Qmi8658;
 use crate::shared::{self, RECORDS, STORAGE_CMDS, STREAMS, StorageCmd, Stream, event, with_status};
 
-type Bus = Spi<'static, Blocking>;
+pub(crate) type Bus = Spi<'static, Blocking>;
 
 /// A chip select that borrows its pin, so devices can be rebuilt after an SD
 /// failure without giving the pin away.
@@ -206,8 +206,8 @@ impl<D: embedded_sdmmc::BlockDevice<Error = embedded_sdmmc::SdCardError>>
     }
 }
 
-type Card<'a> = SdCard<RefCellDevice<'a, Bus, Cs<'a>, Delay>, Delay>;
-type Vm<'a> = VolumeManager<PartView<Card<'a>>, Clock, 4, 12, 1>;
+pub(crate) type Card<'a> = SdCard<RefCellDevice<'a, Bus, Cs<'a>, Delay>, Delay>;
+pub(crate) type Vm<'a> = VolumeManager<PartView<Card<'a>>, Clock, 6, 16, 1>;
 
 struct Session {
     number: u16,
@@ -418,6 +418,118 @@ fn list(vm: &Vm, session: Option<&Session>) {
     if session.is_none() {
         let _ = vm.close_dir(root);
         let _ = vm.close_volume(volume);
+    }
+}
+
+/// `catx DIR/FILE`: a file from a directory in the card's root, as hex lines
+/// between the same BEGIN/END markers and CRC-32 as `cat` — for binary files
+/// (bundle segments, manifests), which `cat` would mangle on the way out.
+fn cat_hex(vm: &Vm, session: Option<&Session>, path: &str) {
+    let (Some(s), Some((d, name))) = (session, path.split_once('/')) else {
+        esp_println::println!("give a path like B0000001/S0000000.SEG");
+        return;
+    };
+    let Ok(dir) = vm.open_dir(s.root, d) else {
+        esp_println::println!("no such directory: {}", d);
+        return;
+    };
+    match vm.open_file_in_dir(dir, name, Mode::ReadOnly) {
+        Ok(f) => {
+            let level = log::max_level();
+            log::set_max_level(log::LevelFilter::Off);
+            let len = vm.file_length(f).unwrap_or(0);
+            esp_println::println!("----- BEGIN {} {} bytes hex -----", path, len);
+            let mut buf = [0u8; 48];
+            let mut crc = 0xFFFF_FFFFu32;
+            let mut total = 0u32;
+            loop {
+                match vm.read(f, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        crc = crc32_update(crc, &buf[..n]);
+                        total += n as u32;
+                        for b in &buf[..n] {
+                            esp_println::print!("{:02x}", b);
+                        }
+                        esp_println::println!();
+                    }
+                    Err(_) => {
+                        esp_println::println!("[read error]");
+                        break;
+                    }
+                }
+            }
+            esp_println::println!(
+                "----- END {} {} bytes crc32={:08x} -----",
+                path,
+                total,
+                !crc
+            );
+            log::set_max_level(level);
+            let _ = vm.close_file(f);
+        }
+        Err(_) => esp_println::println!("no such file: {}", path),
+    }
+    let _ = vm.close_dir(dir);
+}
+
+fn open_bundle(
+    vm: &Vm,
+    root: RawDirectory,
+    id: &crate::ident::Identity,
+    boot_id: [u8; 16],
+) -> Option<crate::bundle::OpenBundle> {
+    match crate::bundle::OpenBundle::open(vm, root, id, boot_id, shared::now_ms()) {
+        Ok(b) => {
+            event(
+                "bundle",
+                format_args!("{} opened (device_counter {})", b.name, b.counter),
+            );
+            Some(b)
+        }
+        Err(e) => {
+            event("bundle", format_args!("not opened: {}", e));
+            None
+        }
+    }
+}
+
+/// Finish the open bundle, if any, and seal it.
+fn close_bundle(
+    vm: &Vm,
+    root: RawDirectory,
+    id: &crate::ident::Identity,
+    boot_id: [u8; 16],
+    bundle: &mut Option<crate::bundle::OpenBundle>,
+) {
+    let Some(b) = bundle.take() else { return };
+    let name = b.finish(vm, shared::now_ms());
+    match crate::bundle::seal(vm, root, name.as_str(), id, boot_id, false) {
+        Ok(s) => event(
+            "bundle_sealed",
+            format_args!(
+                "{} id {}: {} frames, {} segments, {} bytes, {:?}",
+                name,
+                cairn_format::hex(&s.bundle_id),
+                s.frames,
+                s.segments,
+                s.bytes,
+                s.recovery
+            ),
+        ),
+        Err(e) => event(
+            "bundle_sealed",
+            format_args!("{} not sealed: {} (retried at boot)", name, e),
+        ),
+    }
+}
+
+fn bundle_failed(bundle: &mut Option<crate::bundle::OpenBundle>, why: &str) {
+    if let Some(b) = bundle.take() {
+        event(
+            "bundle",
+            format_args!("{} stopped: {}; sealed at the next boot", b.name, why),
+        );
     }
 }
 
@@ -942,6 +1054,16 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
     let mut locating: Option<(trail_core::prime::Plan, &'static str, u64)> = None;
     let mut learning: Option<(i32, i32, u16, i64, u64)> = None;
     let mut last_learn: Option<Instant> = None;
+    // Sealed format/v3 bundles (T2): the device identity (read or made on
+    // first use), this boot's id, whether open bundles left by a power cut
+    // have been sealed, and the bundle being written.
+    let mut identity: Option<crate::ident::Identity> = None;
+    let mut boot_id = [0u8; 16];
+    if let Ok(rng) = esp_hal::rng::Trng::try_new() {
+        rng.read(&mut boot_id);
+    }
+    let mut recovered = false;
+    let mut bundle: Option<crate::bundle::OpenBundle> = None;
 
     loop {
         // (Re)mount the card and open a session.
@@ -994,6 +1116,22 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
 
         let mut assist = session.as_ref().and_then(|s| assist_open(&vm, s));
 
+        if let Some(s) = session.as_ref() {
+            if identity.is_none() {
+                match crate::ident::load_or_create() {
+                    Ok(id) => identity = Some(id),
+                    Err(e) => event("bundle", format_args!("no identity ({}); bundles off", e)),
+                }
+            }
+            if let Some(id) = identity.as_ref() {
+                if !recovered {
+                    crate::bundle::recover(&vm, s.root, id, boot_id);
+                    recovered = true;
+                }
+                bundle = open_bundle(&vm, s.root, id, boot_id);
+            }
+        }
+
         // Run until the card fails, or a stop/start asks for a new session.
         loop {
             ticker.next().await;
@@ -1024,6 +1162,11 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                     );
                     if session.is_some() {
                         b.extend_from_slice(line.as_bytes());
+                    }
+                    if let Some(bu) = bundle.as_mut()
+                        && let Err(e) = bu.imu(&vm, shared::now_ms(), s.accel_mg, s.gyro_ddps)
+                    {
+                        bundle_failed(&mut bundle, e);
                     }
                     if imu_n.is_multiple_of(50) {
                         log::debug!("IMU {}", line.trim_end());
@@ -1177,6 +1320,30 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                 }
             }
 
+            // The bundle: GNSS epochs, the minute's health, and a new bundle
+            // every half hour. A failure stops bundles for this session and
+            // never touches the CSV logging.
+            while let Ok(e) = shared::BUNDLE_GNSS.try_receive() {
+                if let Some(bu) = bundle.as_mut()
+                    && let Err(err) = bu.gnss(&vm, &e)
+                {
+                    bundle_failed(&mut bundle, err);
+                }
+            }
+            if let Some(bu) = bundle.as_mut()
+                && let Err(err) = bu.tick(&vm, shared::now_ms())
+            {
+                bundle_failed(&mut bundle, err);
+            }
+            if let (Some(s), Some(id)) = (session.as_ref(), identity.as_ref())
+                && bundle.as_ref().is_some_and(|b| {
+                    shared::now_ms() - b.opened_ms >= crate::bundle::BUNDLE_ROLL_MS
+                })
+            {
+                close_bundle(&vm, s.root, id, boot_id, &mut bundle);
+                bundle = open_bundle(&vm, s.root, id, boot_id);
+            }
+
             let mut failed = false;
             if let Some(s) = session.as_ref() {
                 match write_out(&vm, s, &mut bufs, WRITE_THRESHOLD) {
@@ -1185,6 +1352,11 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                 }
                 if !failed && last_flush.elapsed() >= FLUSH_EVERY {
                     last_flush = Instant::now();
+                    if let Some(bu) = bundle.as_ref()
+                        && let Err(err) = bu.flush(&vm)
+                    {
+                        bundle_failed(&mut bundle, err);
+                    }
                     match write_out(&vm, s, &mut bufs, 0).and_then(|n| flush_all(&vm, s).map(|_| n))
                     {
                         Ok(n) => bytes += n as u64,
@@ -1218,6 +1390,11 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                             let _ = vm.close_file(a.file);
                         }
                         if let Some(s) = session.take() {
+                            // Seal the bundle first: a stop is how the card
+                            // is made safe to pull.
+                            if let Some(id) = identity.as_ref() {
+                                close_bundle(&vm, s.root, id, boot_id, &mut bundle);
+                            }
                             let _ = write_out(&vm, &s, &mut bufs, 0);
                             let n = s.number;
                             close_session(&vm, s);
@@ -1235,6 +1412,40 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                             break; // reopen through the mount path
                         }
                     }
+                    StorageCmd::CatHex(p) => {
+                        if let Some(bu) = bundle.as_ref() {
+                            let _ = bu.flush(&vm);
+                        }
+                        cat_hex(&vm, session.as_ref(), p.as_str());
+                    }
+                    StorageCmd::Bundle(sub) => match (session.as_ref(), identity.as_ref()) {
+                        (Some(s), Some(id)) => match sub {
+                            shared::BundleCmd::Show => match bundle.as_ref() {
+                                Some(b) => esp_println::println!(
+                                    "bundle: open {} counter={} frames={} age_s={} device_key={}",
+                                    b.name,
+                                    b.counter,
+                                    b.frames,
+                                    (shared::now_ms() - b.opened_ms) / 1000,
+                                    crate::bundle::public_key_hex(id)
+                                ),
+                                None => esp_println::println!(
+                                    "bundle: none open counter={:?} device_key={}",
+                                    crate::ident::counter_now(),
+                                    crate::bundle::public_key_hex(id)
+                                ),
+                            },
+                            shared::BundleCmd::Seal => {
+                                close_bundle(&vm, s.root, id, boot_id, &mut bundle);
+                                bundle = open_bundle(&vm, s.root, id, boot_id);
+                                esp_println::println!(
+                                    "bundle: sealed; now writing {}",
+                                    bundle.as_ref().map_or("(none)", |b| b.name.as_str())
+                                );
+                            }
+                        },
+                        _ => esp_println::println!("bundle: no card session or no identity"),
+                    },
                     StorageCmd::WifiLocate(scan) => match session.as_ref() {
                         Some(s) => match wififp_locate(&vm, s, &scan) {
                             Some(e) => esp_println::println!(
@@ -1357,6 +1568,14 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
         }
         if let Some(a) = assist.take() {
             let _ = vm.close_file(a.file);
+        }
+        // The card failed or a new session was asked for: an open bundle is
+        // left as it is on the card and sealed at the next boot.
+        if bundle.take().is_some() {
+            event(
+                "bundle",
+                format_args!("left open; it is sealed at the next boot"),
+            );
         }
         if let Some(s) = session.take() {
             close_session(&vm, s);

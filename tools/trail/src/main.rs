@@ -8,6 +8,7 @@
 //!     trail provision cert|test|write --mac 48:ca:43:5b:ed:60
 
 mod assistnow;
+mod bundle;
 mod config;
 mod console;
 mod prime;
@@ -41,6 +42,9 @@ enum Cmd {
     /// u-blox AssistNow: register, download, load onto the card.
     #[command(subcommand)]
     Assistnow(assistnow::Cmd),
+    /// Sealed format/v3 bundles: pull off the card, verify with the server's verifier.
+    #[command(subcommand)]
+    Bundle(bundle::Cmd),
     /// Provision identity, Wi-Fi and server over USB.
     #[command(subcommand)]
     Provision(provision::Cmd),
@@ -53,6 +57,7 @@ fn main() -> ExitCode {
         Cmd::Verify(a) => verify::run(a),
         Cmd::Prime(a) => prime::run(a).map(|_| true),
         Cmd::Assistnow(c) => assistnow::run(c).map(|_| true),
+        Cmd::Bundle(c) => bundle::run(c),
         Cmd::Provision(c) => provision::run_cmd(c).map(|_| true),
     };
     match r {

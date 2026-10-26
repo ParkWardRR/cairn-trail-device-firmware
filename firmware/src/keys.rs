@@ -17,7 +17,9 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use esp_storage::FlashStorage;
 
 pub const OFFSET: u32 = 0x12000;
-pub const SIZE: usize = 0x6000;
+/// The first 8 KiB of the 24 KiB `cairn` partition (a provisioned store is
+/// ~1.2 KiB); the rest holds the bundle identity and counter (`ident.rs`).
+pub const SIZE: usize = 0x2000;
 const MAGIC: &[u8; 4] = b"CRNK";
 const VERSION: u8 = 1;
 const HEADER: usize = 12;
@@ -56,6 +58,12 @@ pub fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// The flash, for the other records in the `cairn` partition (`ident.rs`).
+/// None until `init`.
+pub fn with_flash<R>(f: impl FnOnce(&mut FlashStorage<'static>) -> R) -> Option<R> {
+    FLASH.lock(|fl| fl.borrow_mut().as_mut().map(f))
 }
 
 /// Take the flash and load the store. Returns whether a valid store was found.
