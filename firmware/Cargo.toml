@@ -22,7 +22,16 @@ verbose = []
 trail-core = { path = "../crates/trail-core" }
 
 esp-hal = { version = "~1.2.2", features = ["esp32s3", "log-04", "unstable"] }
-esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp32s3", "log-04"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32s3", "log-04"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp32s3", "log-04", "unstable", "wifi"] }
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
+embedded-storage = "0.3"
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "dns", "log", "medium-ethernet", "proto-ipv4", "tcp"] }
+embedded-io-async = "0.7.0"
+embedded-tls = { version = "0.19.0", default-features = false, features = ["rustpki", "log"] }
+rand_core = { version = "0.6", default-features = false }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "pkcs8"] }
+signature = { version = "2.2", default-features = false }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
 esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
 esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }

@@ -148,6 +148,10 @@ fn build_identity() {
     let dirty = run(&["status", "--porcelain", "--", ".", "../crates"])
         .map(|s| !s.is_empty())
         .unwrap_or(true);
+    // The commit's own time: a reproducible "not before" for TLS certificate
+    // dates when the device has no trustworthy clock yet.
+    let epoch = run(&["log", "-1", "--format=%ct"]).unwrap_or_else(|| "1792886400".into());
+    println!("cargo:rustc-env=CAIRN_BUILD_EPOCH={epoch}");
     println!("cargo:rustc-env=CAIRN_GIT_COMMIT={commit}");
     println!(
         "cargo:rustc-env=CAIRN_GIT_DIRTY={}",

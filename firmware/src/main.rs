@@ -12,6 +12,8 @@
 mod display;
 mod gnss;
 mod imu;
+mod keys;
+mod net;
 mod pmu;
 mod sensors;
 mod shared;
@@ -93,6 +95,9 @@ async fn main(spawner: Spawner) -> ! {
     }
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    // Wi-Fi buffers, TLS records and TCP windows need more than the reclaimed
+    // bootloader RAM.
+    esp_alloc::heap_allocator!(size: 128 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
@@ -154,6 +159,13 @@ async fn main(spawner: Spawner) -> ! {
     }
     let mut delay = esp_hal::delay::Delay::new();
     let configured = pmu.configure(true, &mut delay).is_ok();
+    // Identity and network settings, from the `cairn` flash partition.
+    let provisioned = keys::init(esp_storage::FlashStorage::new(p.FLASH));
+    event("keys", format_args!("{}", keys::summary()));
+    let _ = provisioned;
+    // The hardware TRNG (radio noise and the ADC) for TLS; held for the
+    // program's life.
+    let _trng_source = esp_hal::rng::TrngSource::new(p.RNG, p.ADC1);
     if let (Ok((dc, ldo)), Ok(off)) = (pmu.rails(), pmu.lora_rail_off()) {
         event(
             "rails",
@@ -205,6 +217,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(tasks::console_task(rx).unwrap());
     spawner.spawn(tasks::status_task().unwrap());
 
+    // Wi-Fi and the check-in, if provisioned.
+    net::start(&spawner, p.WIFI);
+
     event(
         "boot",
         format_args!(
@@ -220,5 +235,6 @@ async fn main(spawner: Spawner) -> ! {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(3600)).await;
         // Keep the LoRa pins' configuration alive for the life of the program.
         let _ = &_lora_pins;
+        let _ = &_trng_source;
     }
 }

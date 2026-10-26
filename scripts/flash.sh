@@ -27,7 +27,8 @@ esac
 (cd firmware && cargo build --release ${FEATURES[@]+"${FEATURES[@]}"})
 ELF=firmware/target/xtensa-esp32s3-none-elf/release/cairn-trail
 
-espflash flash --chip esp32s3 --port "$PORT" "$ELF"
+# A/B app slots and the `cairn` identity partition (firmware/partitions.csv).
+espflash flash --chip esp32s3 --port "$PORT" --partition-table firmware/partitions.csv "$ELF"
 
 # Clear the force-download bit if a 1200-baud reboot left it set, then reset
 # into the application through the watchdog.

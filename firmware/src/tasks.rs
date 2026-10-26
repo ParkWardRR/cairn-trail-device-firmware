@@ -1,6 +1,8 @@
 //! The small tasks: the PMU and RTC on I²C bus 1, the BOOT button, the GNSS
 //! PPS line, the USB console, and a periodic status line.
 
+extern crate alloc;
+
 use core::fmt::Write as _;
 
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -266,12 +268,87 @@ fn print_stat() {
     );
 }
 
-const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | reboot";
+const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
+
+/// A provisioning payload arriving over the console in hex lines.
+static PROV_BUF: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<alloc::vec::Vec<u8>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(alloc::vec::Vec::new()));
+
+fn hex_decode(s: &str, out: &mut alloc::vec::Vec<u8>) -> bool {
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(2) {
+        return false;
+    }
+    for pair in b.chunks(2) {
+        let v = |c: u8| (c as char).to_digit(16);
+        match (v(pair[0]), v(pair[1])) {
+            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn prov(arg: &str) {
+    let (sub, rest) = arg
+        .split_once(' ')
+        .map(|(a, b)| (a, b.trim()))
+        .unwrap_or((arg, ""));
+    match sub {
+        "show" | "" => esp_println::println!(
+            "prov: mac={} {}",
+            crate::mac_string(),
+            crate::keys::summary()
+        ),
+        "begin" => {
+            PROV_BUF.lock(|b| b.borrow_mut().clear());
+            esp_println::println!("prov: ready");
+        }
+        "data" => {
+            let ok = PROV_BUF.lock(|b| hex_decode(rest, &mut b.borrow_mut()));
+            let n = PROV_BUF.lock(|b| b.borrow().len());
+            esp_println::println!("prov: {} {}", if ok { "ok" } else { "BAD HEX" }, n);
+        }
+        "commit" => {
+            let want = u32::from_str_radix(rest, 16).ok();
+            let data = PROV_BUF.lock(|b| core::mem::take(&mut *b.borrow_mut()));
+            let got = crate::keys::crc32(&data);
+            if want != Some(got) {
+                esp_println::println!(
+                    "prov: CRC MISMATCH got {:08x} want {:?}; nothing written",
+                    got,
+                    rest
+                );
+                return;
+            }
+            match crate::keys::write(&data) {
+                Ok(()) => {
+                    event(
+                        "keys",
+                        format_args!("provisioned over USB: {}", crate::keys::summary()),
+                    );
+                    esp_println::println!(
+                        "prov: written {} bytes; reboot to start Wi-Fi",
+                        data.len()
+                    );
+                }
+                Err(e) => esp_println::println!("prov: FAILED {}", e),
+            }
+        }
+        "erase" => match crate::keys::erase() {
+            Ok(()) => esp_println::println!("prov: erased"),
+            Err(e) => esp_println::println!("prov: FAILED {}", e),
+        },
+        _ => esp_println::println!("prov: show | begin | data <hex> | commit <crc32> | erase"),
+    }
+}
 
 /// Line commands over the USB serial port.
 #[embassy_executor::task]
 pub async fn console_task(mut rx: UsbSerialJtagRx<'static, Blocking>) {
-    let mut line: String<64> = String::new();
+    let mut line: String<1100> = String::new();
     loop {
         Timer::after(Duration::from_millis(10)).await;
         while let Ok(b) = rx.read_byte() {
@@ -312,6 +389,17 @@ async fn run(cmd: &str) {
         "flush" => STORAGE_CMDS.send(StorageCmd::Flush).await,
         "stop" => STORAGE_CMDS.send(StorageCmd::Stop).await,
         "start" => STORAGE_CMDS.send(StorageCmd::Start).await,
+        "prov" => prov(arg),
+        "net" => {
+            let s = shared::status();
+            esp_println::println!(
+                "net: wifi_up={} checkins={} errors={} | {}",
+                s.wifi_up,
+                s.checkins,
+                s.checkin_errors,
+                crate::keys::summary()
+            );
+        }
         "gnssid" => {
             // The receiver's identity frames in hex, whole, for AssistNow
             // registration (scripts/assistnow.py reads these lines).

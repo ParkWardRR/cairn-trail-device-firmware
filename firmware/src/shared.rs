@@ -160,6 +160,10 @@ pub struct Status {
     pub marks: u16,
     pub display_on: bool,
 
+    pub wifi_up: bool,
+    pub checkins: u32,
+    pub checkin_errors: u32,
+
     pub assist_queued: u32,
     pub assist_sent: u32,
     pub assist_accepted: u32,
@@ -208,6 +212,9 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         soc_pct: 0,
         marks: 0,
         display_on: true,
+        wifi_up: false,
+        checkins: 0,
+        checkin_errors: 0,
         assist_queued: 0,
         assist_sent: 0,
         assist_accepted: 0,
@@ -253,6 +260,18 @@ pub static ASSIST: Channel<CriticalSectionRawMutex, AssistFrame, 8> = Channel::n
 
 /// The firmware's identity, as printed at boot and written to INFO.TXT.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Unix time of the commit this was built from.
+pub const BUILD_EPOCH: u64 = const_parse(env!("CAIRN_BUILD_EPOCH"));
+const fn const_parse(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut v = 0u64;
+    while i < b.len() {
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    v
+}
 pub const COMMIT: &str = env!("CAIRN_GIT_COMMIT");
 pub const DIRTY: &str = env!("CAIRN_GIT_DIRTY");
 #[cfg(feature = "verbose")]
