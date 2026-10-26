@@ -23,7 +23,8 @@ case "$FLAVOUR" in
   *) echo "flavour must be verbose or release"; exit 1 ;;
 esac
 
-(cd firmware && cargo build --release "${FEATURES[@]}")
+# bash 3.2 (macOS) treats an empty array as unbound under `set -u`.
+(cd firmware && cargo build --release ${FEATURES[@]+"${FEATURES[@]}"})
 ELF=firmware/target/xtensa-esp32s3-none-elf/release/cairn-trail
 
 espflash flash --chip esp32s3 --port "$PORT" "$ELF"
