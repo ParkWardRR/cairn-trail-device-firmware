@@ -8,6 +8,7 @@ against the CRC-32 the firmware prints after it.
     scripts/console.py --reset --seconds 60 --log evidence/boot.log
     scripts/console.py --cmd stat --cmd ls --seconds 5
     scripts/console.py --pull GNSS.CSV --pull BARO.CSV --out pulled/
+    scripts/console.py --session S0009 --out pulled/S0009
 
 Needs pyserial. Homebrew's esptool ships one:
     $(ls /opt/homebrew/Cellar/esptool/*/libexec/bin/python | head -1) scripts/console.py ...
@@ -21,6 +22,10 @@ import time
 import zlib
 
 import serial
+
+
+SESSION_FILES = ["INFO.TXT", "EVENTS.CSV", "GNSS.CSV", "SAT.CSV", "BARO.CSV",
+                 "MAG.CSV", "POWER.CSV", "PPS.CSV", "IMU.CSV"]
 
 
 def find_port(explicit):
@@ -62,10 +67,14 @@ def main():
     ap.add_argument("--wait", type=float, default=0.0, help="seconds before sending commands")
     ap.add_argument("--cmd", action="append", default=[], help="console command (repeatable)")
     ap.add_argument("--pull", action="append", default=[], help="file to `cat` and save (repeatable)")
+    ap.add_argument("--session", help="pull every file of this session, e.g. S0009")
     ap.add_argument("--out", default=".", help="directory for pulled files")
     ap.add_argument("--log", help="append everything received to this file")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
+
+    if a.session:
+        a.pull += [f"{a.session}/{f}" for f in SESSION_FILES]
 
     s = open_port(a.port)
     if a.reset:
