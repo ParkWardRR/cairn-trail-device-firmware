@@ -285,7 +285,7 @@ planned, not built:
 The design is in the Cairn front door:
 [docs/trail-device-plan.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trail-device-plan.md);
 the schedule is phases
-[T1–T8 of the Cairn roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
+[T1–T8 of the Cairn roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--in-progress).
 This repository pins the Cairn contracts it will use in [`contracts.lock`](contracts.lock).
 
 <!-- cairn-nav:start -->

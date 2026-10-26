@@ -3,7 +3,7 @@
 How the first Cairn firmware meets the board: in stages, each a small `examples/` binary with
 `defmt` logs, each leaving a dated evidence file with the real output. Nothing here has run yet.
 This is a procedure, not a schedule — the schedule is
-[T1 in the Cairn roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--designed).
+[T1 in the Cairn roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#t1t8--the-trail-device--in-progress).
 
 The staging and evidence habit come from SoloTrail and LilyGO's factory test
 ([prior-art.md §8](prior-art.md#8-bring-up-method)). The facts each stage checks are in
