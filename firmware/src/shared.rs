@@ -2,6 +2,8 @@
 //! and the storage task drains, and a snapshot of the latest readings for the
 //! display and the console.
 
+extern crate alloc;
+
 use core::cell::RefCell;
 use core::fmt::Write;
 
@@ -130,6 +132,8 @@ pub struct Status {
     pub lat_e7: i32,
     pub lon_e7: i32,
     pub hmsl_mm: i32,
+    /// Height above the WGS84 ellipsoid, what the receiver's position aiding wants.
+    pub height_mm: i32,
     pub h_acc_mm: u32,
     pub v_acc_mm: u32,
     pub speed_mms: i32,
@@ -168,6 +172,37 @@ pub struct Status {
     pub assist_sent: u32,
     pub assist_accepted: u32,
     pub assist_rejected: u32,
+
+    /// The RTC as Unix seconds and the uptime (ms) it was read or set at; None
+    /// if it was implausible. `rtc_now()` extrapolates from it.
+    pub rtc_base: Option<(i64, u64)>,
+    /// The PMU task has read the RTC once since boot.
+    pub rtc_read_done: bool,
+    /// When the RTC was last checked against GNSS or the host this boot (Unix
+    /// seconds; 0 = not yet).
+    pub rtc_checked_unix: i64,
+    pub prime: PrimeState,
+    /// What was planned: time accuracy (ms) and position accuracy (m); 0 = none.
+    pub prime_time_acc_ms: u32,
+    pub prime_pos_acc_m: u32,
+}
+
+/// Priming the receiver at power-on with the time and the last position
+/// (`trail_core::prime`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrimeState {
+    /// Waiting for the card and the RTC.
+    #[default]
+    Pending,
+    /// Frames are planned and waiting for the receiver to say whether it
+    /// needs them.
+    Planned,
+    /// Sent to a receiver that woke without time.
+    Sent,
+    /// Not needed: the receiver woke with time from its backup supply.
+    Skipped,
+    /// Nothing worth sending.
+    Nothing,
 }
 
 pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
@@ -187,6 +222,7 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         lat_e7: 0,
         lon_e7: 0,
         hmsl_mm: 0,
+        height_mm: 0,
         h_acc_mm: 0,
         v_acc_mm: 0,
         speed_mms: 0,
@@ -219,6 +255,12 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         assist_sent: 0,
         assist_accepted: 0,
         assist_rejected: 0,
+        rtc_base: None,
+        rtc_read_done: false,
+        rtc_checked_unix: 0,
+        prime: PrimeState::Pending,
+        prime_time_acc_ms: 0,
+        prime_pos_acc_m: 0,
     }));
 
 pub fn with_status<R>(f: impl FnOnce(&mut Status) -> R) -> R {
@@ -229,6 +271,13 @@ pub fn status() -> Status {
     STATUS.lock(|s| *s.borrow())
 }
 
+/// The RTC's time now, extrapolated from its last reading by the uptime clock.
+pub fn rtc_now() -> Option<i64> {
+    status()
+        .rtc_base
+        .map(|(unix, at_ms)| unix + (now_ms().saturating_sub(at_ms) / 1000) as i64)
+}
+
 /// Commands from the console to the storage task.
 pub enum StorageCmd {
     List,
@@ -236,6 +285,17 @@ pub enum StorageCmd {
     Flush,
     Stop,
     Start,
+    /// Print PRIME.TXT and what it would prime the receiver with now.
+    PrimeShow,
+    /// The computer's time (Unix seconds) and/or a hand-given position
+    /// (lat_e7, lon_e7, ellipsoid height cm, accuracy cm): record them in
+    /// PRIME.TXT.
+    PrimeHost {
+        unix: Option<i64>,
+        pos: Option<(i32, i32, i32, u32)>,
+    },
+    /// Replace ASSIST.UBX with these bytes and feed it to the receiver now.
+    PutAssist(alloc::vec::Vec<u8>),
 }
 
 pub static STORAGE_CMDS: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
@@ -257,6 +317,21 @@ pub static GNSS_IDENTITY: Mutex<CriticalSectionRawMutex, RefCell<GnssIdentity>> 
 /// way to the receiver. An empty frame marks the end of the file.
 pub type AssistFrame = heapless::Vec<u8, 512>;
 pub static ASSIST: Channel<CriticalSectionRawMutex, AssistFrame, 8> = Channel::new();
+
+/// Frames from the console for the receiver (e.g. `gnss cold`), sent at once,
+/// never held back by priming.
+pub static GNSS_CMD: Channel<CriticalSectionRawMutex, AssistFrame, 2> = Channel::new();
+
+/// The priming position frame (MGA-INI-POS_LLH) planned at boot from
+/// PRIME.TXT and the RTC. The GNSS task sends it — after a time frame it
+/// builds from the RTC as it sends — only if the receiver woke without time,
+/// and before any AssistNow data.
+pub static PRIME_FRAMES: Mutex<CriticalSectionRawMutex, RefCell<heapless::Vec<AssistFrame, 2>>> =
+    Mutex::new(RefCell::new(heapless::Vec::new()));
+
+/// Unix seconds to set the RTC to (from the computer, over the console).
+pub static RTC_SET: embassy_sync::signal::Signal<CriticalSectionRawMutex, i64> =
+    embassy_sync::signal::Signal::new();
 
 /// The firmware's identity, as printed at boot and written to INFO.TXT.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

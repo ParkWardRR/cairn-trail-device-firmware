@@ -26,6 +26,12 @@ step "trail-core: clippy"
 step "trail-core: host tests"
 (cd crates/trail-core && cargo +stable test)
 
+step "trail (host tool): format, clippy, tests, build"
+(cd tools/trail && cargo +stable fmt --check)
+(cd tools/trail && cargo +stable clippy --all-targets -- -D warnings)
+(cd tools/trail && cargo +stable test)
+(cd tools/trail && cargo +stable build --release)
+
 step "firmware: format"
 (cd firmware && cargo fmt --check)
 

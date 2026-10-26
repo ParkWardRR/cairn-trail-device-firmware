@@ -1,10 +1,10 @@
 # Cairn trail logger: A/B app slots for over-the-air updates, and a small
-# `cairn` partition (subtype 0x40) holding the device's identity and network
+# `cairn` partition (data, subtype undefined) holding the device's identity and network
 # settings (see src/keys.rs). 8 MB flash.
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x6000
 otadata,  data, ota,     0xf000,   0x2000
 phy_init, data, phy,     0x11000,  0x1000
-cairn,    data, 0x40,    0x12000,  0x6000
+cairn,    data, undefined, 0x12000, 0x6000
 ota_0,    app,  ota_0,   0x20000,  0x3E0000
 ota_1,    app,  ota_1,   0x400000, 0x3E0000

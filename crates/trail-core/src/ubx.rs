@@ -19,9 +19,11 @@ pub const NAV_SAT: u8 = 0x35;
 pub const ACK_NAK: u8 = 0x00;
 pub const ACK_ACK: u8 = 0x01;
 pub const CFG_CFG: u8 = 0x09;
+pub const CFG_RST: u8 = 0x04;
 pub const CFG_VALSET: u8 = 0x8A;
 pub const MON_VER: u8 = 0x04;
 pub const MGA_ACK: u8 = 0x60;
+pub const MGA_INI: u8 = 0x40;
 pub const SEC_UNIQID: u8 = 0x03;
 
 /// Largest payload the parser keeps. NAV-SAT is 8 + 12 bytes per satellite;
@@ -497,11 +499,140 @@ pub fn ack_target(p: &[u8]) -> Option<(u8, u8)> {
     Some((p[0], p[1]))
 }
 
+/// UBX-MGA-INI-TIME_UTC: tell a receiver that has no time what the time is.
+/// `acc_ms` is the honest uncertainty; the receiver weighs the hint by it.
+/// Leap seconds are given as unknown (-128): the receiver knows them better.
+pub fn mga_ini_time_utc(
+    t: &crate::pcf8563::DateTime,
+    nanos: u32,
+    acc_ms: u32,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut p = [0u8; 24];
+    p[0] = 0x10; // type: TIME_UTC
+    p[1] = 0x00; // version
+    p[2] = 0x00; // ref: on receipt of this message
+    p[3] = 0x80; // leapSecs: unknown
+    p[4..6].copy_from_slice(&t.year.to_le_bytes());
+    p[6] = t.month;
+    p[7] = t.day;
+    p[8] = t.hour;
+    p[9] = t.min;
+    p[10] = t.sec;
+    p[12..16].copy_from_slice(&nanos.min(999_999_999).to_le_bytes());
+    let secs = (acc_ms / 1000).min(u16::MAX as u32) as u16;
+    p[16..18].copy_from_slice(&secs.to_le_bytes());
+    p[20..24].copy_from_slice(&((acc_ms % 1000) * 1_000_000).to_le_bytes());
+    frame(CLASS_MGA, MGA_INI, &p, out)
+}
+
+/// UBX-MGA-INI-POS_LLH: an approximate position. `alt_cm` is height above
+/// the WGS84 ellipsoid, not above sea level; `acc_cm` its uncertainty.
+pub fn mga_ini_pos_llh(
+    lat_e7: i32,
+    lon_e7: i32,
+    alt_cm: i32,
+    acc_cm: u32,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut p = [0u8; 20];
+    p[0] = 0x01; // type: POS_LLH
+    p[4..8].copy_from_slice(&lat_e7.to_le_bytes());
+    p[8..12].copy_from_slice(&lon_e7.to_le_bytes());
+    p[12..16].copy_from_slice(&alt_cm.to_le_bytes());
+    p[16..20].copy_from_slice(&acc_cm.to_le_bytes());
+    frame(CLASS_MGA, MGA_INI, &p, out)
+}
+
+/// UBX-CFG-RST with a controlled GNSS-only restart (the host keeps running).
+/// `nav_bbr_mask` says what battery-backed state to clear: 0xFFFF a cold
+/// start (time, position, orbits all forgotten), 0x0001 a warm start (orbits
+/// only), 0x0000 a hot start.
+pub fn cfg_rst(nav_bbr_mask: u16, out: &mut [u8]) -> Option<usize> {
+    let m = nav_bbr_mask.to_le_bytes();
+    frame(CLASS_CFG, CFG_RST, &[m[0], m[1], 0x02, 0x00], out)
+}
+
+/// Whether a whole frame is UBX-MGA-INI (time or position). AssistNow Online
+/// replies start with one stamped when they were made; loaded from the card
+/// hours later it would tell the receiver a wrong time with a confident
+/// accuracy, so the logger drops them and sends its own.
+pub fn is_mga_ini(frame: &[u8]) -> bool {
+    frame.len() >= 4 && frame[2] == CLASS_MGA && frame[3] == MGA_INI
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
     use std::vec::Vec;
+
+    #[test]
+    fn cfg_rst_cold_start_frame() {
+        let mut out = [0u8; 16];
+        let n = cfg_rst(0xFFFF, &mut out).unwrap();
+        // Known-good frame from u-blox u-center: cold start, controlled GNSS reset.
+        assert_eq!(
+            &out[..n],
+            &[0xB5, 0x62, 0x06, 0x04, 0x04, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x0E, 0x61]
+        );
+    }
+
+    #[test]
+    fn mga_ini_frames_have_the_documented_layout() {
+        let t = crate::pcf8563::DateTime {
+            year: 2026,
+            month: 10,
+            day: 26,
+            hour: 14,
+            min: 5,
+            sec: 9,
+        };
+        let mut out = [0u8; 64];
+        let n = mga_ini_time_utc(&t, 250_000_000, 2_500, &mut out).unwrap();
+        assert_eq!(n, 8 + 24);
+        assert_eq!(&out[..6], &[0xB5, 0x62, 0x13, 0x40, 24, 0]);
+        let p = &out[6..30];
+        assert_eq!((p[0], p[3]), (0x10, 0x80));
+        assert_eq!(
+            (
+                u16::from_le_bytes([p[4], p[5]]),
+                p[6],
+                p[7],
+                p[8],
+                p[9],
+                p[10]
+            ),
+            (2026, 10, 26, 14, 5, 9)
+        );
+        assert_eq!(
+            u32::from_le_bytes(p[12..16].try_into().unwrap()),
+            250_000_000
+        );
+        assert_eq!(u16::from_le_bytes([p[16], p[17]]), 2);
+        assert_eq!(
+            u32::from_le_bytes(p[20..24].try_into().unwrap()),
+            500_000_000
+        );
+        assert!(is_mga_ini(&out[..n]));
+
+        let n = mga_ini_pos_llh(374_219_980, -1_220_840_570, 1_230, 80_000, &mut out).unwrap();
+        assert_eq!(n, 8 + 20);
+        assert_eq!(&out[..6], &[0xB5, 0x62, 0x13, 0x40, 20, 0]);
+        let p = &out[6..26];
+        assert_eq!(p[0], 0x01);
+        assert_eq!(i32::from_le_bytes(p[4..8].try_into().unwrap()), 374_219_980);
+        assert_eq!(
+            i32::from_le_bytes(p[8..12].try_into().unwrap()),
+            -1_220_840_570
+        );
+        assert_eq!(i32::from_le_bytes(p[12..16].try_into().unwrap()), 1_230);
+        assert_eq!(u32::from_le_bytes(p[16..20].try_into().unwrap()), 80_000);
+        // Round-trips through the parser.
+        let mut parser = Parser::new();
+        let info = out[..n].iter().find_map(|&b| parser.push(b)).unwrap();
+        assert_eq!((info.class, info.id), (CLASS_MGA, MGA_INI));
+    }
 
     fn feed(p: &mut Parser, bytes: &[u8]) -> Vec<(FrameInfo, Vec<u8>)> {
         let mut out = Vec::new();

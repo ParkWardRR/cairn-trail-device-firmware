@@ -47,7 +47,8 @@ altitude, climb and descent with pressure, and battery or USB state.
 
 ## The console
 
-Over the board's own USB port (USB-Serial-JTAG; no driver needed). `scripts/console.py` wraps it.
+Over the board's own USB port (USB-Serial-JTAG; no driver needed). The host tool `trail`
+(`tools/trail`, Rust) wraps it.
 
 | Command | Does |
 |---|---|
@@ -57,18 +58,29 @@ Over the board's own USB port (USB-Serial-JTAG; no driver needed). `scripts/cons
 | `flush` | Write and flush every buffer now |
 | `stop` / `start` | Close the session (card safe to remove) / open a new one |
 | `mark` | A mark, as the BOOT button |
+| `gnssid` | The receiver's identity frames, for AssistNow registration |
+| `gnss cold` / `warm` / `hot` | Restart the receiver forgetting time+orbits+position / orbits / nothing (UBX-CFG-RST), to measure time to first fix |
+| `prime` / `prime time <unix_ms>` / `prime pos <lat> <lon> [alt_m] [acc_m]` | Show the priming record and plan / give the receiver a time or a position now (see [Priming](#priming)) |
+| `assist begin` / `data <hex>` / `commit <crc32>` | Write `ASSIST.UBX` over USB and feed it to the receiver at once |
+| `prov show` / `begin` / `data` / `commit` / `erase` | Identity and network settings ([uplink.md](uplink.md)) |
+| `net` | Wi-Fi and check-in state |
 | `reboot` | Close the session and restart |
 
 **A `cat` pauses logging** while it streams (about 20 KB/s; a 800 KB IMU file takes 40 s): the
 storage task owns the bus and the thread-mode tasks wait for it. The gap is visible in the files'
 `t_ms`. GNSS keeps running on its interrupt-priority executor and is buffered meanwhile.
 
+Payloads (`assist`, `prov`) go as `data` lines of 24 bytes, each answered with the running byte
+count before the next is sent, then a CRC-32 over the whole: a lost byte is caught at once.
+
 ```sh
-PY=$(ls /opt/homebrew/Cellar/esptool/*/libexec/bin/python | head -1)   # has pyserial
-$PY scripts/console.py --cmd stat --cmd ls
-$PY scripts/console.py --session S0007 --out pulled/S0007     # every file of a session
-$PY scripts/console.py --pull S0007/GNSS.CSV --out pulled/S0007  # or one at a time
-python3 scripts/verify.py pulled/S0007 --stationary
+cd tools/trail && cargo build --release && cd -      # once; or scripts/ci.sh
+T=tools/trail/target/release/trail
+$T console --cmd stat --cmd ls
+$T console --session S0007 --out pulled/S0007        # every file of a session, CRC-checked
+$T console --pull S0007/GNSS.CSV --out pulled/S0007  # or one at a time
+$T console --reset --seconds 30 --log boot.log       # a boot, captured
+$T verify pulled/S0007 --stationary
 ```
 
 ## Building, flashing, releasing — all local
@@ -105,23 +117,73 @@ themselves, which takes minutes from cold. The logger takes it from the card:
 - **At boot** the GNSS task reads the receiver's identity — UBX-MON-VER and UBX-SEC-UNIQID, the
   chip's unique ID — and keeps both whole frames; `gnssid` on the console prints them in hex
   (`EVENTS.CSV` records the unique ID as `gnss_uniqid`).
-- **Registration** (`scripts/assistnow.py register`, once per board) posts them to Thingstream's
+- **Registration** (`trail assistnow register`, once per board) posts them to Thingstream's
   zero-touch-provisioning endpoint with the device profile's ZTP token:
-  `{"token": …, "messages": {"UBX-SEC-UNIQID": "<hex>", "UBX-MON-VER": "<hex>"}}` — a format
-  confirmed from the API's validation errors (`messages` must be an object of hex strings). The
-  response, which carries the chipcode bound to this receiver, is kept in
-  `~/.config/cairn/assistnow.json` (0600).
-- **Download** (`fetch`) asks the service the response names for data with that chipcode and keeps
-  it only if it is well-formed UBX; **install** copies it to `ASSIST.UBX` in the card's root.
+  `{"token": …, "messages": {"UBX-SEC-UNIQID": "<hex>", "UBX-MON-VER": "<hex>"}}`. The response
+  is kept in `~/.config/cairn/assistnow.json` (0600): the chipcode bound to this receiver, the
+  service URL (`https://assistnow.services.u-blox.com/GetAssistNowData.ashx`) and the data the
+  plan allows — `ulorb_l1` (live orbits), `uporb_1/3/7/14` (predicted orbits for 1–14 days),
+  `ualm`, `utime`, `ukion`, `usvht`.
+- **Download** (`trail assistnow fetch --param data=… --param gnss=gps,gal,bds,glo`) keeps the
+  reply only if it is well-formed UBX, and lists its frames by type.
+- **Onto the card**: `trail assistnow upload` over USB (the board writes `ASSIST.UBX` and feeds it
+  at once), or `install` to a card in a reader.
 - **On the board**, the storage task reads `ASSIST.UBX` a little per tick and hands it frame by
   frame to the GNSS task, which writes it to the receiver after configuring it (UBX input on,
-  `CFG-NAVSPG-ACKAIDING` so each message is answered with UBX-MGA-ACK), 8 ms apart. `stat` shows
-  frames queued, sent, accepted and not used; `EVENTS.CSV` records `assist_file` and
-  `assist_sent`. The file stays on the card; the receiver ignores data that has expired.
+  `CFG-NAVSPG-ACKAIDING` so each message is answered with UBX-MGA-ACK) — **one frame per pass of
+  its loop**, reading the UART in between. `stat` shows frames queued, sent, accepted and not used;
+  `EVENTS.CSV` records `assist_file` and `assist_sent`. The file stays on the card; the receiver
+  ignores data that has expired. MGA-INI frames in the file — the time an Online reply was made,
+  wrong by the time the card is used — are dropped; priming sends the time as it is now.
 
-Credentials live in `~/.config/cairn/thingstream.env` (mode 0600; the script refuses a file others
-can read) and never in this repository. **Status: built, not yet run** — identity capture,
-registration, download and the feed all wait for the board to be plugged in.
+Which data: **live orbits** (`ulorb_l1`, ~8 KB for four constellations) are good for about four
+hours — fetch just before heading out. **Predicted orbits** (`uporb_7`, `uporb_14`) last up to two
+weeks and suit a card that goes on a trip.
+
+Credentials live in `~/.config/cairn/thingstream.env` (mode 0600; `trail` refuses a file others can
+read) and never in this repository.
+
+**Verified on the board, 2026-10-26:** identity read, registration accepted, 8 396 bytes of live
+orbits for GPS, Galileo, BeiDou and GLONASS (110 frames) fetched, uploaded over USB and fed: **all
+109 MGA frames acknowledged as accepted** (the 110th, an MGA-INI time, dropped as above). After a
+cold start and reboot the order held — priming time first, then the 109 — 110 of 110 accepted.
+The time to a first fix outdoors with and without it is still to be measured: indoors there was no
+fix either way.
+
+## Priming
+
+A receiver that wakes knowing neither when nor where it is searches the whole sky. Told roughly,
+it looks only for the satellites that should be up — u-blox documents a faster strategy once the
+position is known to ~100 km. Nothing needs the internet:
+
+- **`PRIME.TXT`** in the card's root holds the last good fix (accuracy ≤ 50 m, refreshed every
+  5 minutes while the fix holds): `lat`, `lon`, `alt_m` (height above the WGS84 ellipsoid),
+  `acc_m`, `fix_unix` (when it was true), `rtc_unix` (when the RTC was last checked against GNSS or
+  the computer) and `source`. Plain text: edit it on any computer, or write a position with
+  `source=manual` and `fix_unix=0`.
+- **At boot** the storage task reads it and plans (`trail_core::prime::plan`, host-tested):
+  - *time*, from the RTC, only if `rtc_unix` says the RTC was checked, the RTC has not gone back
+    since, and the check is under 180 days old; accuracy 2 s + 4 s per day since. A plausible RTC
+    alone is not believed: this board's was set at a factory and read 25 days wrong.
+  - *position*, with its accuracy grown at highway speed (25 m/s) for the time since it was true;
+    a hand-written position with no time is taken as current; any other position of unknown age is
+    given 300 km; nothing past 1000 km.
+- **On the first NAV-PVT** the GNSS task decides: a receiver that woke with date and time kept
+  its state on its backup supply (the 18650 feeds V_BCKP, a hot start) and is left alone; one that
+  woke without gets `UBX-MGA-INI-TIME_UTC` (read off the RTC as it is sent) and
+  `UBX-MGA-INI-POS_LLH`, before any AssistNow data. `EVENTS.CSV`: `prime_plan`, `prime`, and
+  `fix_acquired … uptime_s=` — the time to first fix.
+- **From the computer**: `trail prime` sends this Mac's clock (±1 s), setting the RTC and
+  `rtc_unix`; `trail prime --lat … --lon … [--alt …] [--acc …]` also a position.
+- The RTC is checked against GNSS **only with a fix**: a primed receiver reports the RTC's own time
+  back as resolved, and checking the RTC against that echo would make it look trustworthy.
+
+**Verified on the board, 2026-10-26:** with no `PRIME.TXT` and the RTC 25 days wrong, nothing was
+sent. After `trail prime`, the RTC read true, and a `gnss cold` + reboot gave a receiver reporting
+2021-03-07: priming sent the time, the receiver acknowledged it, and within 7 s reported
+2026-10-26 with date, time and full resolution valid. After a plain reboot the receiver kept its
+time and priming correctly sent nothing. Position priming and the effect on time to first fix
+need open sky.
 
 ## SD cards
 
@@ -135,7 +197,7 @@ first basic-data partition to the FAT library as if it were an MBR partition, ne
 On 2026-10-25, on the owner's unit (V3.1 carrier, ESP32-S3 rev 0.2, MAX-M10S SPG 5.10, 62.6 GB
 SDXC formatted FAT32 under a GUID map), indoors, on USB power with no cell fitted. Each build was
 flashed from a clean commit, left to record, and every file of its session pulled back over USB
-with matching CRC-32s; then `scripts/verify.py --stationary`. The output is in
+with matching CRC-32s; then the session check with `--stationary` (a Python script then, `trail verify` now). The output is in
 [`evidence/`](../evidence/).
 
 | | Verbose build (`b54d1a8`, session S0009) | Release build (`3ea9c46`, session S0012) |
@@ -150,8 +212,9 @@ with matching CRC-32s; then `scripts/verify.py --stationary`. The output is in
 | Screen | status screen shown, checked by eye | turned itself off after 60 s, as the release build should |
 
 Both runs showed up to 3.7 g in the IMU's first half-second after enabling, while its low-pass
-filters settle. **v0.1.0 skips the first second** (`83f494f`); that change was merged after the
-last verified run and has not itself been checked on the board.
+filters settle. **v0.1.0 skips the first second** (`83f494f`). Checked on 2026-10-26 (session
+S0026, at rest): |a| between 874 and 1080 mg from the first row; `trail verify --stationary` now
+fails any session with a sample above 1.5 g at rest.
 
 **Not yet proven:** a GNSS fix (and therefore PPS, RTC correction from GNSS and the elevation
 anchoring), the display and BOOT button by eye, battery operation and charging, and long runs.
@@ -176,4 +239,12 @@ Each of these cost a debugging round on the real board; they are now handled in 
   unit answered at 115 200 baud after a reset. The firmware probes the baud rate, resets the
   configuration to defaults, and writes its own to the RAM layer every boot.
 - **The RTC was set by Meshtastic and was 25 days wrong**, with its voltage-low flag clear — a
-  plausible-looking lie. It is only corrected from a resolved GNSS time.
+  plausible-looking lie. It is only corrected from a GNSS time with a fix, or the computer's clock.
+- **esp-println's `auto` printer ate console input.** On the ESP32-S3 its USB-host check reads
+  `0x60038000` — the USB-Serial-JTAG FIFO register, not the interrupt status at `+0x08` — so every
+  line printed while a command was arriving swallowed one received byte: ~1 command in 9 with the
+  verbose log on, and 6 bytes of the first provisioning payload. The firmware uses the
+  `jtag-serial` printer; 24 of 24 commands then arrived.
+- **Sixteen AssistNow frames in a row lost every acknowledgement.** At 9600 baud that is 1.3 s
+  without reading the UART, and its 128-byte receive FIFO overflowed: 109 frames sent, 0
+  acknowledged, NAV checksums failing. One frame per pass: 109 of 109 acknowledged.

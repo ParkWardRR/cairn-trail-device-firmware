@@ -45,9 +45,9 @@ From reading `cairn-vehicle-server` and the dongle firmware, not the specs alone
 ## Provisioning (stage 1)
 
 ```sh
-python3 scripts/provision.py cert  --mac 48:ca:43:5b:ed:60   # issue CN=<device id> from the Cairn CA
-python3 scripts/provision.py test  --mac 48:ca:43:5b:ed:60   # try it against the server from this Mac
-python3 scripts/provision.py write --mac 48:ca:43:5b:ed:60 --pin-bssid   # write it all to the board
+trail provision cert  --mac 48:ca:43:5b:ed:60   # issue CN=<device id> from the Cairn CA
+trail provision test  --mac 48:ca:43:5b:ed:60   # try it against the server from this Mac
+trail provision write --mac 48:ca:43:5b:ed:60 --pin-bssid   # write it all to the board
 ```
 
 Nothing secret enters the repository: the CA key stays in `~/cairn-backups/pki-20261007/`, the

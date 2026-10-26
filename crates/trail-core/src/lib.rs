@@ -8,4 +8,5 @@ pub mod bme280;
 pub mod elevation;
 pub mod gpt;
 pub mod pcf8563;
+pub mod prime;
 pub mod ubx;

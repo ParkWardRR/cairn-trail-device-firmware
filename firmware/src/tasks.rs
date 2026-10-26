@@ -55,6 +55,12 @@ pub async fn pmu_task(mut pmu: Pmu<I2c1>) {
         ),
         None => event("rtc", format_args!("PCF8563 did not answer")),
     }
+    with_status(|s| {
+        s.rtc_base = rtc_at_boot
+            .filter(|(t, vl)| pcf8563::plausible(t, *vl))
+            .map(|(t, _)| (pcf8563::unix_seconds(&t), shared::now_ms()));
+        s.rtc_read_done = true;
+    });
     let mut rtc_set = false;
 
     let mut ticker = Ticker::every(Duration::from_millis(100));
@@ -123,9 +129,13 @@ pub async fn pmu_task(mut pmu: Pmu<I2c1>) {
         }
 
         // Set the RTC once per boot from a resolved GNSS time, if the RTC is
-        // implausible or more than 2 s away from it.
+        // implausible or more than 2 s away from it. Only with a fix: a
+        // receiver primed from the RTC reports that same time as resolved
+        // before it has heard a satellite, and checking the RTC against its
+        // own echo would make it look trustworthy.
         if !rtc_set
             && n.is_multiple_of(10)
+            && shared::status().fix_ok
             && let Some(utc) = shared::status().utc
             && pcf8563::plausible(&utc, false)
         {
@@ -148,7 +158,31 @@ pub async fn pmu_task(mut pmu: Pmu<I2c1>) {
                     format_args!("RTC agrees with GNSS within {:?} s", off),
                 );
             }
+            let unix = pcf8563::unix_seconds(&utc);
+            with_status(|s| {
+                s.rtc_base = Some((unix, shared::now_ms()));
+                s.rtc_checked_unix = unix;
+            });
             rtc_set = true;
+        }
+
+        // The computer's clock, sent over the console (`prime time`).
+        if let Some(unix) = shared::RTC_SET.try_take() {
+            let t = pcf8563::from_unix(unix);
+            let ok = pcf8563::plausible(&t, false) && rtc_write(pmu.i2c(), &t);
+            event(
+                "rtc_set",
+                format_args!(
+                    "from the computer {:04}-{:02}-{:02}T{:02}:{:02}:{:02} ok={}",
+                    t.year, t.month, t.day, t.hour, t.min, t.sec, ok
+                ),
+            );
+            if ok {
+                with_status(|s| {
+                    s.rtc_base = Some((unix, shared::now_ms()));
+                    s.rtc_checked_unix = unix;
+                });
+            }
         }
     }
 }
@@ -216,7 +250,8 @@ fn print_stat() {
          baro ok={} p={:.1}Pa t={:.2}C rh={:.1}% elev={:.1}m gain={:.1}m loss={:.1}m anchored={}\n\
          imu ok={} accel_mg={:?}  mag ok={} heading={:.0}\n\
          power battery={} vbat={}mV vbus={}mV charging={} soc={}%  marks={} display={}\n\
-         assistnow queued={} sent={} accepted={} not_used={}",
+         assistnow queued={} sent={} accepted={} not_used={}\n\
+         prime {:?} time_acc={}ms pos_acc={}m rtc_now={:?} rtc_checked={}",
         shared::VERSION,
         shared::FLAVOUR,
         shared::COMMIT,
@@ -265,10 +300,15 @@ fn print_stat() {
         s.assist_sent,
         s.assist_accepted,
         s.assist_rejected,
+        s.prime,
+        s.prime_time_acc_ms,
+        s.prime_pos_acc_m,
+        shared::rtc_now(),
+        s.rtc_checked_unix,
     );
 }
 
-const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
+const HELP: &str = "commands: help | stat | ls | cat <S0001/GNSS.CSV or GNSS.CSV> | flush | stop | start | mark | gnssid | gnss cold|warm|hot | prime show|time <unix_ms>|pos <lat> <lon> [alt_m] [acc_m] | assist begin|data|commit | net | prov show|begin|data <hex>|commit <crc32>|erase | reboot";
 
 /// A provisioning payload arriving over the console in hex lines.
 static PROV_BUF: embassy_sync::blocking_mutex::Mutex<
@@ -291,6 +331,177 @@ fn hex_decode(s: &str, out: &mut alloc::vec::Vec<u8>) -> bool {
     true
 }
 
+type ByteBuf = embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<alloc::vec::Vec<u8>>,
+>;
+
+/// An AssistNow file arriving over the console, for ASSIST.UBX.
+static ASSIST_BUF: ByteBuf =
+    embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(alloc::vec::Vec::new()));
+/// Largest ASSIST.UBX accepted over the console. A day of AssistNow Online
+/// data for every constellation is ~10 KB; Offline for a few weeks is larger.
+const ASSIST_MAX: usize = 96 * 1024;
+
+/// The `begin` / `data <hex>` / `commit <crc32>` steps shared by `prov` and
+/// `assist`. Each reply starts with `<name>:`; `data` answers with the running
+/// byte count so the sender can tell a lost byte at once. Returns the payload
+/// once `commit` names its CRC-32; other subcommands return None and are
+/// left to the caller.
+fn chunked(
+    name: &str,
+    buf: &ByteBuf,
+    max: usize,
+    sub: &str,
+    rest: &str,
+) -> Option<alloc::vec::Vec<u8>> {
+    match sub {
+        "begin" => {
+            buf.lock(|b| b.borrow_mut().clear());
+            esp_println::println!("{}: ready", name);
+        }
+        "data" => {
+            let (ok, n) = buf.lock(|b| {
+                let mut b = b.borrow_mut();
+                if b.len() + rest.len() / 2 > max {
+                    return (false, b.len());
+                }
+                (hex_decode(rest, &mut b), b.len())
+            });
+            let verdict = if ok {
+                "ok"
+            } else if n + rest.len() / 2 > max {
+                "FULL"
+            } else {
+                "BAD HEX"
+            };
+            esp_println::println!("{}: {} {}", name, verdict, n);
+        }
+        "commit" => {
+            let want = u32::from_str_radix(rest, 16).ok();
+            let data = buf.lock(|b| core::mem::take(&mut *b.borrow_mut()));
+            let got = crate::keys::crc32(&data);
+            if want != Some(got) {
+                esp_println::println!(
+                    "{}: CRC MISMATCH got {:08x} want {:?}; nothing written",
+                    name,
+                    got,
+                    rest
+                );
+                return None;
+            }
+            return Some(data);
+        }
+        _ => {}
+    }
+    None
+}
+
+async fn assist(arg: &str) {
+    let (sub, rest) = arg
+        .split_once(' ')
+        .map(|(a, b)| (a, b.trim()))
+        .unwrap_or((arg, ""));
+    if !matches!(sub, "begin" | "data" | "commit") {
+        esp_println::println!("assist: begin | data <hex> | commit <crc32>  (writes ASSIST.UBX)");
+        return;
+    }
+    if let Some(data) = chunked("assist", &ASSIST_BUF, ASSIST_MAX, sub, rest) {
+        STORAGE_CMDS.send(StorageCmd::PutAssist(data)).await;
+    }
+}
+
+/// `prime`: show what the receiver will be primed with, or give it the
+/// computer's time (`prime time <unix_ms>`) or a position (`prime pos <lat>
+/// <lon> [alt_m] [acc_m]`, height above the WGS84 ellipsoid). Both are sent
+/// to the receiver at once and recorded in PRIME.TXT for the next power-on.
+async fn prime(arg: &str) {
+    let mut words = arg.split_whitespace();
+    match words.next().unwrap_or("show") {
+        "show" => STORAGE_CMDS.send(StorageCmd::PrimeShow).await,
+        "time" => {
+            let Some(ms) = words.next().and_then(|w| w.parse::<i64>().ok()) else {
+                esp_println::println!("prime: time <unix milliseconds>");
+                return;
+            };
+            let unix = ms.div_euclid(1000);
+            let t = pcf8563::from_unix(unix);
+            if !pcf8563::plausible(&t, false) {
+                esp_println::println!("prime: implausible time {}", unix);
+                return;
+            }
+            let mut f = shared::AssistFrame::new();
+            let mut raw = [0u8; 40];
+            // A second covers the USB round trip and the console's polling.
+            if let Some(n) = trail_core::ubx::mga_ini_time_utc(
+                &t,
+                (ms.rem_euclid(1000) * 1_000_000) as u32,
+                1_000,
+                &mut raw,
+            ) {
+                let _ = f.extend_from_slice(&raw[..n]);
+                let _ = shared::ASSIST.try_send(f);
+            }
+            shared::RTC_SET.signal(unix);
+            STORAGE_CMDS
+                .send(StorageCmd::PrimeHost {
+                    unix: Some(unix),
+                    pos: None,
+                })
+                .await;
+            esp_println::println!(
+                "prime: time {:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z sent to the receiver and the RTC",
+                t.year,
+                t.month,
+                t.day,
+                t.hour,
+                t.min,
+                t.sec
+            );
+        }
+        "pos" => {
+            let fixed = |w: Option<&str>, d| w.and_then(|w| trail_core::prime::parse_fixed(w, d));
+            let lat = fixed(words.next(), 7).and_then(|v| i32::try_from(v).ok());
+            let lon = fixed(words.next(), 7).and_then(|v| i32::try_from(v).ok());
+            let alt_cm = fixed(words.next(), 2)
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0);
+            let acc_cm = fixed(words.next(), 2)
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(trail_core::prime::MANUAL_ACC_CM);
+            let (Some(lat), Some(lon)) = (lat, lon) else {
+                esp_println::println!("prime: pos <lat> <lon> [alt_m] [acc_m]");
+                return;
+            };
+            if !(-900_000_000..=900_000_000).contains(&lat)
+                || !(-1_800_000_000..=1_800_000_000).contains(&lon)
+            {
+                esp_println::println!("prime: position out of range");
+                return;
+            }
+            let mut f = shared::AssistFrame::new();
+            let mut raw = [0u8; 40];
+            if let Some(n) = trail_core::ubx::mga_ini_pos_llh(lat, lon, alt_cm, acc_cm, &mut raw) {
+                let _ = f.extend_from_slice(&raw[..n]);
+                let _ = shared::ASSIST.try_send(f);
+            }
+            STORAGE_CMDS
+                .send(StorageCmd::PrimeHost {
+                    unix: None,
+                    pos: Some((lat, lon, alt_cm, acc_cm)),
+                })
+                .await;
+            esp_println::println!(
+                "prime: position sent to the receiver, accuracy {} m",
+                acc_cm / 100
+            );
+        }
+        _ => {
+            esp_println::println!("prime: show | time <unix_ms> | pos <lat> <lon> [alt_m] [acc_m]")
+        }
+    }
+}
+
 fn prov(arg: &str) {
     let (sub, rest) = arg
         .split_once(' ')
@@ -302,27 +513,10 @@ fn prov(arg: &str) {
             crate::mac_string(),
             crate::keys::summary()
         ),
-        "begin" => {
-            PROV_BUF.lock(|b| b.borrow_mut().clear());
-            esp_println::println!("prov: ready");
-        }
-        "data" => {
-            let ok = PROV_BUF.lock(|b| hex_decode(rest, &mut b.borrow_mut()));
-            let n = PROV_BUF.lock(|b| b.borrow().len());
-            esp_println::println!("prov: {} {}", if ok { "ok" } else { "BAD HEX" }, n);
-        }
-        "commit" => {
-            let want = u32::from_str_radix(rest, 16).ok();
-            let data = PROV_BUF.lock(|b| core::mem::take(&mut *b.borrow_mut()));
-            let got = crate::keys::crc32(&data);
-            if want != Some(got) {
-                esp_println::println!(
-                    "prov: CRC MISMATCH got {:08x} want {:?}; nothing written",
-                    got,
-                    rest
-                );
+        "begin" | "data" | "commit" => {
+            let Some(data) = chunked("prov", &PROV_BUF, crate::keys::SIZE, sub, rest) else {
                 return;
-            }
+            };
             match crate::keys::write(&data) {
                 Ok(()) => {
                     event(
@@ -390,6 +584,33 @@ async fn run(cmd: &str) {
         "stop" => STORAGE_CMDS.send(StorageCmd::Stop).await,
         "start" => STORAGE_CMDS.send(StorageCmd::Start).await,
         "prov" => prov(arg),
+        "prime" => prime(arg).await,
+        "gnss" => {
+            // Restart the receiver forgetting some of what it knows, to
+            // measure time to first fix and test priming. Follow `cold` with
+            // `reboot` to see the logger prime a receiver that woke empty.
+            let mask = match arg {
+                "cold" => Some(0xFFFF),
+                "warm" => Some(0x0001),
+                "hot" => Some(0x0000),
+                _ => None,
+            };
+            let mut raw = [0u8; 16];
+            match mask.and_then(|m| trail_core::ubx::cfg_rst(m, &mut raw)) {
+                Some(n) => {
+                    let mut f = shared::AssistFrame::new();
+                    let _ = f.extend_from_slice(&raw[..n]);
+                    let _ = shared::GNSS_CMD.try_send(f);
+                    event(
+                        "gnss_restart",
+                        format_args!("{} start requested from the console", arg),
+                    );
+                    esp_println::println!("gnss: {} start sent", arg);
+                }
+                None => esp_println::println!("gnss: cold | warm | hot"),
+            }
+        }
+        "assist" => assist(arg).await,
         "net" => {
             let s = shared::status();
             esp_println::println!(

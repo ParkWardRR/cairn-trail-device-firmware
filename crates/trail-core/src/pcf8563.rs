@@ -88,6 +88,29 @@ pub fn unix_seconds(t: &DateTime) -> i64 {
     days * 86_400 + t.hour as i64 * 3_600 + t.min as i64 * 60 + t.sec as i64
 }
 
+/// The inverse of `unix_seconds` (Hinnant's civil-from-days).
+pub fn from_unix(secs: i64) -> DateTime {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = (yoe + era * 400 + if month <= 2 { 1 } else { 0 }) as u16;
+    DateTime {
+        year,
+        month,
+        day,
+        hour: (rem / 3_600) as u8,
+        min: (rem % 3_600 / 60) as u8,
+        sec: (rem % 60) as u8,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +166,23 @@ mod tests {
             sec: 0,
         };
         assert_eq!(unix_seconds(&t), 1_792_886_400);
+    }
+
+    #[test]
+    fn from_unix_inverts_unix_seconds() {
+        for s in [
+            0i64,
+            951_782_400,
+            1_792_886_400,
+            1_792_972_799,
+            4_102_444_800,
+        ] {
+            assert_eq!(unix_seconds(&from_unix(s)), s);
+        }
+        let t = from_unix(1_792_886_400 + 21 * 3600 + 5 * 60 + 9);
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.min, t.sec),
+            (2026, 10, 25, 21, 5, 9)
+        );
     }
 }

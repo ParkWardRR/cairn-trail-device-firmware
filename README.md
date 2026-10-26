@@ -138,7 +138,7 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 **Pull the card** and read it on any computer.
 
 **Or over USB, without opening the case.** The board appears as a serial port; type commands at
-115200 baud, or use the bundled script:
+115200 baud, or use the bundled host tool `trail` (Rust, in `tools/trail`):
 
 | Command | |
 |---|---|
@@ -147,53 +147,78 @@ change as climb. Every column is documented in [docs/firmware.md](docs/firmware.
 | `cat S0003/GNSS.CSV` | Send a file, framed and with a CRC-32 checksum |
 | `stop` / `start` | Close the session so the card is safe to pull / open a new one |
 | `gnssid` | The GPS receiver's identity frames, for AssistNow registration |
+| `prime` | What the GPS will be told at power-on (see below) |
+| `gnss cold` | Make the GPS forget everything, to time a cold start |
 | `flush` · `mark` · `reboot` | |
 
 ```sh
-pip install pyserial
-python3 scripts/console.py --cmd stat --cmd ls
-python3 scripts/console.py --session S0003 --out data/S0003    # every file, checksums verified
-python3 scripts/verify.py data/S0003                           # sanity-check a session
+cargo build --release --manifest-path tools/trail/Cargo.toml
+T=tools/trail/target/release/trail
+$T console --cmd stat --cmd ls
+$T console --session S0003 --out data/S0003    # every file, checksums verified
+$T verify data/S0003                           # sanity-check a session
 ```
 
 A transfer pauses logging while it runs (about 20 KB/s, so an hour of IMU data takes a few
 minutes); the gap is visible in the files.
 
-## Faster fixes with AssistNow (optional)
+## Faster fixes
 
-From cold, a GPS receiver needs minutes to download satellite orbits from the sky. u-blox
-**AssistNow** sells that data over the internet, and the logger can load it from the card at
-power-on, so a fix comes in seconds, even on a trail with no signal.
+From cold, a GPS receiver searches the whole sky, then needs minutes to download satellite orbits
+from it. Two things shorten that, and both work on a trail with no signal.
+
+**Priming: where and when it last was (built in, no account).** The logger keeps its last good
+fix in `PRIME.TXT` on the card. At power-on, if the GPS woke with no memory (no battery to keep
+its backup alive), the logger tells it the time from its clock and that position, with an honest
+uncertainty that grows with the time since. The clock is only believed once it has been checked
+against GPS or a computer. Give it a start from your Mac:
 
 ```sh
-python3 scripts/assistnow.py identity             # board plugged in: read the receiver's chip ID
-python3 scripts/assistnow.py register             # once per board, with your Thingstream ZTP token
-python3 scripts/assistnow.py fetch                # download fresh data to assist/ASSIST.UBX
-python3 scripts/assistnow.py install /Volumes/GPS # copy it to the card's root
+$T prime                                   # this Mac's clock, to the GPS and the logger's clock
+$T prime --lat 47.6062 --lon -122.3321     # and a position (WGS84; --alt, --acc optional)
+```
+
+or write `lat=`/`lon=` and `source=manual` into `PRIME.TXT` on the card.
+
+**AssistNow: the satellites' orbits (optional, internet).** u-blox **AssistNow** sells the orbit
+data over the internet; the logger loads it from the card at power-on.
+
+```sh
+$T assistnow identity                      # board plugged in: read the receiver's chip ID
+$T assistnow register                      # once per board, with your Thingstream ZTP token
+$T assistnow fetch --param data=ulorb_l1,ukion,usvht --param gnss=gps,gal,bds,glo
+                                           # live orbits (~8 KB, good for ~4 h); uporb_7 / uporb_14
+                                           # for predicted orbits that last a week or two
+$T assistnow upload                        # over USB: written to the card and fed at once
+$T assistnow install /Volumes/GPS          # or copy to a card in a reader
 ```
 
 You need a [Thingstream](https://portal.thingstream.io/) account with an AssistNow device profile
 (the evaluation plan covers three receivers). Its ZTP token goes in
-`~/.config/cairn/thingstream.env`, mode 0600 — **never in this repository**. At boot the logger
-streams `ASSIST.UBX` into the receiver and counts how many messages it accepted (`stat`,
-`EVENTS.CSV`). **Built, not yet tested on the board:** registration needs the receiver's own
-identity frames, so the first run happens with the board plugged in.
+`~/.config/cairn/thingstream.env`, mode 0600 — **never in this repository**. `stat` and
+`EVENTS.CSV` count the messages the receiver accepted.
+
+**Tested on the board (2026-10-26):** registration, download, USB upload and feeding — 109 of 109
+orbit messages accepted — and priming a receiver that had been cold-started: the time was
+accepted and the receiver reported the right date within 7 s. How much sooner a fix comes
+outdoors is still to be measured.
 
 ## What is proven
 
-Tested on 2026-10-25 on a real board (V3.1 carrier), indoors, on USB power. Each build was left
-recording, every file was pulled back with matching checksums, and
-[`scripts/verify.py`](scripts/verify.py) checked rates, columns and values. The logs are in
-[`evidence/`](evidence/).
+Tested on 2026-10-25 and 26 on a real board (V3.1 carrier), indoors, on USB power. Each build was
+left recording, every file was pulled back with matching checksums, and the session check
+(`trail verify`) checked rates, columns and values. The logs are in [`evidence/`](evidence/).
 
 | Works, with evidence | Not yet proven |
 |---|---|
-| GPS stream at 1.00 a second, all columns every row | **A GPS fix** — the board has not yet seen open sky, so position, the time pulse, setting the clock from GPS and anchoring elevation are untested |
+| GPS stream at 1.00 a second, all columns every row | **A GPS fix** — the board has not yet seen open sky, so position, the time pulse, setting the clock from GPS, anchoring elevation, and how much priming and AssistNow shorten the time to a fix are untested |
 | Satellite rows every 5 s (up to 18 satellites seen through a roof) | **Running on a battery** and charging one |
 | Barometer at 4.00 a second, elevation steady to under a metre at rest | Long runs (hours, a full card) |
-| Accelerometer and gyroscope at 50.0 a second, ~1 g at rest | Battery life |
-| Compass at ~10 a second; power every 5 s, radio off in every row | Skipping the IMU's first second after power-on (fixed after the last test run) |
+| Accelerometer and gyroscope at 50.0 a second, ~1 g at rest from the first row (the first second after power-on is skipped) | Battery life |
+| Compass at ~10 a second; power every 5 s, radio off in every row | |
 | Screen, mark button and screen toggle, checked by eye; macOS-formatted cards | |
+| AssistNow: registered, downloaded, uploaded over USB, 109 of 109 messages accepted | |
+| Priming a cold GPS with the time; leaving a GPS that kept its memory alone | |
 
 ## Under the hood
 

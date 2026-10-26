@@ -189,8 +189,9 @@ fn store_identity(mon_ver: bool, class: u8, id: u8, payload: &[u8]) {
     }
 }
 
-fn handle_pvt(p: &[u8]) {
-    let Some(pvt) = NavPvt::parse(p) else { return };
+/// Record a NAV-PVT; returns its validity flags.
+fn handle_pvt(p: &[u8]) -> Option<u8> {
+    let pvt = NavPvt::parse(p)?;
     let mut utc: String<32> = String::new();
     let _ = write!(
         utc,
@@ -245,6 +246,7 @@ fn handle_pvt(p: &[u8]) {
             s.lat_e7 = pvt.lat_e7;
             s.lon_e7 = pvt.lon_e7;
             s.hmsl_mm = pvt.hmsl_mm;
+            s.height_mm = pvt.height_mm;
             s.h_acc_mm = pvt.h_acc_mm;
             s.v_acc_mm = pvt.v_acc_mm;
             s.speed_mms = pvt.g_speed_mms;
@@ -263,14 +265,95 @@ fn handle_pvt(p: &[u8]) {
     if has_pos != was_fix {
         event(
             if has_pos { "fix_acquired" } else { "fix_lost" },
+            // The uptime at the first fix is the time to first fix the
+            // priming and AssistNow are meant to shorten.
             format_args!(
-                "fix_type={} sv={} h_acc_m={:.1}",
+                "fix_type={} sv={} h_acc_m={:.1} uptime_s={:.1}",
                 pvt.fix_type,
                 pvt.num_sv,
-                pvt.h_acc_mm as f32 / 1000.0
+                pvt.h_acc_mm as f32 / 1000.0,
+                crate::shared::now_ms() as f32 / 1000.0
             ),
         );
     }
+    Some(pvt.valid)
+}
+
+/// How long after boot priming may stay undecided (no card, no RTC answer)
+/// before AssistNow data is let through without it.
+const PRIME_WAIT: Duration = Duration::from_secs(20);
+
+/// Decide priming once per boot, on the first NAV-PVT: a receiver that woke
+/// with a valid date and time kept its state on the backup supply (the 18650
+/// feeds V_BCKP) and knows better than the RTC and PRIME.TXT, so nothing is
+/// sent; one that woke without gets the planned time and position. Returns
+/// whether priming is decided.
+async fn prime_step(uart: &mut GnssUart, pvt_valid: Option<u8>) -> bool {
+    use crate::shared::PrimeState;
+    let state = crate::shared::status().prime;
+    match state {
+        PrimeState::Sent | PrimeState::Skipped | PrimeState::Nothing => return true,
+        PrimeState::Pending => {
+            if Instant::now().as_millis() > PRIME_WAIT.as_millis() {
+                with_status(|s| s.prime = PrimeState::Nothing);
+                event(
+                    "prime",
+                    format_args!("not planned within {} s; skipped", PRIME_WAIT.as_secs()),
+                );
+                return true;
+            }
+            return false;
+        }
+        PrimeState::Planned => {}
+    }
+    let Some(valid) = pvt_valid else {
+        return false;
+    };
+    let frames = crate::shared::PRIME_FRAMES.lock(|f| core::mem::take(&mut *f.borrow_mut()));
+    if valid & 0x03 == 0x03 {
+        with_status(|s| s.prime = PrimeState::Skipped);
+        event(
+            "prime",
+            format_args!(
+                "receiver woke with date and time (backup supply): {} frames not sent",
+                frames.len()
+            ),
+        );
+    } else {
+        // The time is read off the RTC now, at sending: the message means
+        // "it is this time on receipt".
+        let acc_ms = crate::shared::status().prime_time_acc_ms;
+        let mut sent = 0;
+        if acc_ms > 0
+            && let Some(now) = crate::shared::rtc_now()
+        {
+            let mut raw = [0u8; 40];
+            let t = trail_core::pcf8563::from_unix(now);
+            if let Some(n) = ubx::mga_ini_time_utc(&t, 0, acc_ms, &mut raw) {
+                send(uart, &raw[..n]).await;
+                sent += 1;
+                Timer::after(Duration::from_millis(8)).await;
+            }
+        }
+        for f in &frames {
+            send(uart, f).await;
+            sent += 1;
+            Timer::after(Duration::from_millis(8)).await;
+        }
+        with_status(|s| {
+            s.assist_sent += sent;
+            s.prime = PrimeState::Sent
+        });
+        let s = crate::shared::status();
+        event(
+            "prime",
+            format_args!(
+                "receiver woke without time: sent {} frames (time_acc_ms={} pos_acc_m={})",
+                sent, s.prime_time_acc_ms, s.prime_pos_acc_m
+            ),
+        );
+    }
+    true
 }
 
 /// Decimal degrees from a 1e-7 integer, without float rounding.
@@ -408,13 +491,18 @@ pub async fn gnss_task(
 
         // Run: decode everything; reconfigure if PVT stops for 10 s.
         let mut last_pvt = Instant::now();
+        let mut pvt_valid: Option<u8> = None;
         loop {
-            // AssistNow data from the card, one frame at a time, paced so the
-            // receiver's input buffer keeps up (each is acknowledged by MGA-ACK).
-            for _ in 0..16 {
-                let Ok(frame) = crate::shared::ASSIST.try_receive() else {
-                    break;
-                };
+            // AssistNow data from the card, ONE frame per pass, then back to
+            // reading: at 9600 baud a frame takes ~80 ms to send, and sixteen
+            // in a row (1.3 s without reading) overflowed the 128-byte receive
+            // FIFO, losing the MGA-ACKs and corrupting NAV frames. Held until
+            // priming is decided: time and position go first.
+            while let Ok(frame) = crate::shared::GNSS_CMD.try_receive() {
+                send(&mut uart, &frame).await;
+            }
+            let primed = prime_step(&mut uart, pvt_valid).await;
+            if primed && let Ok(frame) = crate::shared::ASSIST.try_receive() {
                 if frame.is_empty() {
                     let s = crate::shared::status();
                     event(
@@ -424,11 +512,10 @@ pub async fn gnss_task(
                             s.assist_sent, s.assist_accepted, s.assist_rejected
                         ),
                     );
-                    break;
+                } else {
+                    send(&mut uart, &frame).await;
+                    with_status(|s| s.assist_sent += 1);
                 }
-                send(&mut uart, &frame).await;
-                with_status(|s| s.assist_sent += 1);
-                Timer::after(Duration::from_millis(8)).await;
             }
             match select(
                 uart.read_async(&mut buf),
@@ -443,7 +530,8 @@ pub async fn gnss_task(
                             match (f.class, f.id) {
                                 (ubx::CLASS_NAV, ubx::NAV_PVT) => {
                                     last_pvt = Instant::now();
-                                    handle_pvt(p);
+                                    let v = handle_pvt(p);
+                                    pvt_valid = pvt_valid.or(v);
                                 }
                                 (ubx::CLASS_NAV, ubx::NAV_SAT) => handle_sat(p),
                                 (ubx::CLASS_MGA, ubx::MGA_ACK) => {

@@ -491,11 +491,181 @@ fn flush_all(vm: &Vm, s: &Session) -> Result<(), ()> {
     Ok(())
 }
 
+/// A whole file from the card's root, if it exists and fits.
+fn read_root(vm: &Vm, s: &Session, name: &str, out: &mut [u8]) -> Option<usize> {
+    let f = vm.open_file_in_dir(s.root, name, Mode::ReadOnly).ok()?;
+    let mut n = 0;
+    while n < out.len() {
+        match vm.read(f, &mut out[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
+    let _ = vm.close_file(f);
+    Some(n)
+}
+
+/// Replace a file in the card's root.
+fn write_root(vm: &Vm, s: &Session, name: &str, data: &[u8]) -> Result<(), ()> {
+    let f = vm
+        .open_file_in_dir(s.root, name, Mode::ReadWriteCreateOrTruncate)
+        .map_err(|_| ())?;
+    let r = vm.write(f, data).map_err(|_| ());
+    let c = vm.close_file(f).map_err(|_| ());
+    r.and(c)
+}
+
+const PRIME_FILE: &str = "PRIME.TXT";
+/// A position is saved for priming only when it is this good: 50 m.
+const PRIME_SAVE_ACC_MM: u32 = 50_000;
+/// While the fix stays good, PRIME.TXT is refreshed this often.
+const PRIME_SAVE_EVERY: Duration = Duration::from_secs(300);
+
+fn prime_read(vm: &Vm, s: &Session) -> Option<trail_core::prime::Prime> {
+    let mut buf = [0u8; 512];
+    let n = read_root(vm, s, PRIME_FILE, &mut buf)?;
+    trail_core::prime::Prime::parse(core::str::from_utf8(&buf[..n]).ok()?)
+}
+
+fn prime_write(vm: &Vm, s: &Session, p: &trail_core::prime::Prime) -> Result<(), ()> {
+    let mut text: String<512> = String::new();
+    write!(text, "{}", p).map_err(|_| ())?;
+    write_root(vm, s, PRIME_FILE, text.as_bytes())
+}
+
+/// At boot: read PRIME.TXT, decide with the RTC what the receiver should be
+/// told, and leave the position frame for the GNSS task, which sends it (and
+/// the time, read off the RTC as it sends) only if the receiver woke cold.
+fn prime_plan(vm: &Vm, s: &Session) {
+    use trail_core::prime::plan;
+    let rec = prime_read(vm, s);
+    let rtc = shared::rtc_now();
+    let p = plan(rec.as_ref(), rtc);
+    let mut frames: heapless::Vec<shared::AssistFrame, 2> = heapless::Vec::new();
+    if let Some(pos) = p.pos {
+        let mut raw = [0u8; 40];
+        if let Some(n) = trail_core::ubx::mga_ini_pos_llh(
+            pos.lat_e7, pos.lon_e7, pos.alt_cm, pos.acc_cm, &mut raw,
+        ) {
+            let mut f = shared::AssistFrame::new();
+            let _ = f.extend_from_slice(&raw[..n]);
+            let _ = frames.push(f);
+        }
+    }
+    let anything = p.time.is_some() || p.pos.is_some();
+    shared::PRIME_FRAMES.lock(|f| *f.borrow_mut() = frames);
+    with_status(|st| {
+        if st.prime == shared::PrimeState::Pending {
+            st.prime_time_acc_ms = p.time.map_or(0, |t| t.acc_ms);
+            st.prime_pos_acc_m = p.pos.map_or(0, |q| q.acc_cm / 100);
+            st.prime = if anything {
+                shared::PrimeState::Planned
+            } else {
+                shared::PrimeState::Nothing
+            };
+        }
+    });
+    event(
+        "prime_plan",
+        format_args!(
+            "{} rtc={:?} time_acc_ms={:?} pos_acc_m={:?}",
+            match rec {
+                Some(r) => r.source.as_str(),
+                None => "no PRIME.TXT",
+            },
+            rtc,
+            p.time.map(|t| t.acc_ms),
+            p.pos.map(|q| q.acc_cm / 100)
+        ),
+    );
+}
+
+/// While the fix is good: record it in PRIME.TXT for the next power-on.
+fn prime_save_fix(vm: &Vm, s: &Session) -> bool {
+    let st = shared::status();
+    let Some(utc) = st
+        .utc
+        .filter(|_| st.fix_ok && st.h_acc_mm <= PRIME_SAVE_ACC_MM)
+    else {
+        return false;
+    };
+    let old = prime_read(vm, s);
+    let rec = trail_core::prime::Prime {
+        lat_e7: st.lat_e7,
+        lon_e7: st.lon_e7,
+        alt_cm: st.height_mm / 10,
+        acc_cm: st.h_acc_mm / 10,
+        fix_unix: trail_core::pcf8563::unix_seconds(&utc),
+        rtc_unix: if st.rtc_checked_unix > 0 {
+            st.rtc_checked_unix
+        } else {
+            old.map_or(0, |o| o.rtc_unix)
+        },
+        source: trail_core::prime::Source::Gnss,
+    };
+    prime_write(vm, s, &rec).is_ok()
+}
+
+/// The computer's time and/or a hand-given position, from `prime time|pos`.
+fn prime_host(vm: &Vm, s: &Session, unix: Option<i64>, pos: Option<(i32, i32, i32, u32)>) {
+    use trail_core::prime::{Prime, Source};
+    let mut rec = prime_read(vm, s).unwrap_or(Prime {
+        lat_e7: 0,
+        lon_e7: 0,
+        alt_cm: 0,
+        acc_cm: 0,
+        fix_unix: 0,
+        rtc_unix: 0,
+        source: Source::Manual,
+    });
+    if let Some(u) = unix {
+        rec.rtc_unix = u;
+    }
+    if let Some((lat, lon, alt, acc)) = pos {
+        rec.lat_e7 = lat;
+        rec.lon_e7 = lon;
+        rec.alt_cm = alt;
+        rec.acc_cm = acc;
+        // True now, if there is a clock worth believing to say when "now" is.
+        rec.fix_unix = if shared::status().rtc_checked_unix > 0 {
+            shared::rtc_now().unwrap_or(0)
+        } else {
+            0
+        };
+        rec.source = Source::Manual;
+    }
+    match prime_write(vm, s, &rec) {
+        Ok(()) => esp_println::println!("prime: recorded in {}", PRIME_FILE),
+        Err(()) => esp_println::println!("prime: FAILED to write {}", PRIME_FILE),
+    }
+}
+
+fn prime_show(vm: &Vm, s: Option<&Session>) {
+    let Some(s) = s else {
+        esp_println::println!("prime: card not mounted");
+        return;
+    };
+    let rec = prime_read(vm, s);
+    match &rec {
+        Some(r) => esp_println::print!("{}", r),
+        None => esp_println::println!("(no {})", PRIME_FILE),
+    }
+    let p = trail_core::prime::plan(rec.as_ref(), shared::rtc_now());
+    let st = shared::status();
+    esp_println::println!(
+        "prime: state={:?} would send now: time_acc_ms={:?} pos_acc_m={:?}",
+        st.prime,
+        p.time.map(|t| t.acc_ms),
+        p.pos.map(|q| q.acc_cm / 100)
+    );
+}
+
 /// ASSIST.UBX in the card's root: u-blox AssistNow data (UBX-MGA frames)
-/// fetched by `scripts/assistnow.py`. Read a little per tick and handed to the
+/// fetched by `trail assistnow`. Read a little per tick and handed to the
 /// GNSS task frame by frame, so neither the IMU loop nor the receiver is
 /// flooded. The file is left in place for the next boot; the receiver ignores
-/// data that has expired.
+/// data that has expired. MGA-INI frames in it (the time an AssistNow Online
+/// reply was made) are dropped: priming sends the time as it is now.
 struct AssistFeed {
     file: RawFile,
     parser: trail_core::ubx::Parser,
@@ -561,6 +731,7 @@ fn assist_step(vm: &Vm, a: &mut AssistFeed) -> bool {
                 let mut frame = [0u8; 520];
                 if let Some(len) =
                     trail_core::ubx::frame(info.class, info.id, a.parser.payload(&info), &mut frame)
+                    && !trail_core::ubx::is_mga_ini(&frame[..len])
                 {
                     let mut v = shared::AssistFrame::new();
                     if v.extend_from_slice(&frame[..len]).is_ok() && a.pending.push_back(v).is_ok()
@@ -653,6 +824,8 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
     let mut want_recording = true;
     let mut imu_n: u32 = 0;
     let mut bytes: u64 = 0;
+    let mut prime_planned = false;
+    let mut prime_saved: Option<Instant> = None;
 
     loop {
         // (Re)mount the card and open a session.
@@ -761,6 +934,26 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                 assist = None;
             }
 
+            // Priming: plan once per boot when the card and the RTC are
+            // read; record a good fix for the next power-on.
+            if let Some(s) = session.as_ref() {
+                if !prime_planned && shared::status().rtc_read_done {
+                    prime_plan(&vm, s);
+                    prime_planned = true;
+                }
+                if prime_saved.is_none_or(|t| t.elapsed() >= PRIME_SAVE_EVERY)
+                    && prime_save_fix(&vm, s)
+                {
+                    if prime_saved.is_none() {
+                        event(
+                            "prime_saved",
+                            format_args!("first good fix recorded in {}", PRIME_FILE),
+                        );
+                    }
+                    prime_saved = Some(Instant::now());
+                }
+            }
+
             let mut failed = false;
             if let Some(s) = session.as_ref() {
                 match write_out(&vm, s, &mut bufs, WRITE_THRESHOLD) {
@@ -819,6 +1012,41 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                             break; // reopen through the mount path
                         }
                     }
+                    StorageCmd::PrimeShow => prime_show(&vm, session.as_ref()),
+                    StorageCmd::PrimeHost { unix, pos } => match session.as_ref() {
+                        Some(s) => prime_host(&vm, s, unix, pos),
+                        None => esp_println::println!(
+                            "prime: card not mounted; sent to the receiver only"
+                        ),
+                    },
+                    StorageCmd::PutAssist(data) => match session.as_ref() {
+                        Some(s) => {
+                            // The feed may hold the old file open.
+                            if let Some(a) = assist.take() {
+                                let _ = vm.close_file(a.file);
+                            }
+                            match write_root(&vm, s, "ASSIST.UBX", &data) {
+                                Ok(()) => {
+                                    event(
+                                        "assist_file",
+                                        format_args!(
+                                            "ASSIST.UBX written over USB, {} bytes",
+                                            data.len()
+                                        ),
+                                    );
+                                    esp_println::println!(
+                                        "assist: written {} bytes; feeding the receiver",
+                                        data.len()
+                                    );
+                                    assist = assist_open(&vm, s);
+                                }
+                                Err(()) => {
+                                    esp_println::println!("assist: FAILED to write ASSIST.UBX")
+                                }
+                            }
+                        }
+                        None => esp_println::println!("assist: FAILED card not mounted"),
+                    },
                 }
             }
 

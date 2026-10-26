@@ -19,5 +19,6 @@ dist/
 # Files pulled off the card for verification
 pulled/
 
-# AssistNow data downloaded by scripts/assistnow.py (refreshed, not versioned)
+# AssistNow data downloaded by `trail assistnow fetch` (refreshed, not versioned)
 assist/
+tools/*/target/

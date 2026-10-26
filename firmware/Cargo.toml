@@ -35,7 +35,12 @@ signature = { version = "2.2", default-features = false }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3", "log-04"] }
 esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
 esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
-esp-println = { version = "0.18.0", features = ["esp32s3", "log-04"] }
+# Not the default `auto` printer: on the ESP32-S3 its USB-host check reads
+# 0x60038000, which is the USB-Serial-JTAG FIFO, not the interrupt status
+# register (+0x08), so every line printed while a command was arriving
+# swallowed one received byte (~10% of console commands with the verbose log
+# on; 6 bytes of a provisioning payload). The console is USB only.
+esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "log-04", "jtag-serial", "critical-section", "colors"] }
 log = "0.4.27"
 
 embassy-executor = { version = "0.10.0", features = ["log"] }
