@@ -12,25 +12,33 @@ ROOT=$(pwd)
 
 step() { printf '\n== %s\n' "$*"; }
 
+# Everything but the firmware builds on stable; only the firmware needs the
+# Xtensa fork. The version is overridable because clippy runs with `-D
+# warnings`, so a newer stable than the one this repository is developed on
+# fails code that was clean the day before -- a toolchain change wearing a
+# code change's clothes. The fucina image pins this to the Mac's stable
+# (scripts/fucina/Containerfile); locally it is whatever `stable` is.
+STABLE=${CI_STABLE_TOOLCHAIN:-stable}
+
 if [ -f "$HOME/export-esp.sh" ]; then
   # shellcheck disable=SC1091
   . "$HOME/export-esp.sh"
 fi
 
 step "trail-core: format"
-(cd crates/trail-core && cargo +stable fmt --check)
+(cd crates/trail-core && cargo "+$STABLE" fmt --check)
 
 step "trail-core: clippy"
-(cd crates/trail-core && cargo +stable clippy --all-targets -- -D warnings)
+(cd crates/trail-core && cargo "+$STABLE" clippy --all-targets -- -D warnings)
 
 step "trail-core: host tests"
-(cd crates/trail-core && cargo +stable test)
+(cd crates/trail-core && cargo "+$STABLE" test)
 
 step "trail (host tool): format, clippy, tests, build"
-(cd tools/trail && cargo +stable fmt --check)
-(cd tools/trail && cargo +stable clippy --all-targets -- -D warnings)
-(cd tools/trail && cargo +stable test)
-(cd tools/trail && cargo +stable build --release)
+(cd tools/trail && cargo "+$STABLE" fmt --check)
+(cd tools/trail && cargo "+$STABLE" clippy --all-targets -- -D warnings)
+(cd tools/trail && cargo "+$STABLE" test)
+(cd tools/trail && cargo "+$STABLE" build --release)
 
 # The firmware builds cairn-format from the dongle repository at a pinned
 # commit. Its full conformance run -- every format/v3 vector, with the emulator
@@ -46,7 +54,7 @@ if [ ! -d "$FMT_DIR/.git" ]; then
   git -C "$FMT_DIR" checkout --quiet "$REV"
 fi
 (cd "$FMT_DIR" && scripts/fetch-contracts.sh >/dev/null 2>&1 &&
-  cd emulator && cargo +stable run --release --quiet -- conformance | tail -1)
+  cd emulator && cargo "+$STABLE" run --release --quiet -- conformance | tail -1)
 
 step "firmware: format"
 (cd firmware && cargo fmt --check)
@@ -61,7 +69,9 @@ DIRTY=$(git status --porcelain -- firmware crates | grep -q . && echo "-dirty" |
 NAME="cairn-trail-${VERSION}-${COMMIT}${DIRTY}"
 
 rm -rf dist && mkdir -p dist
-ELF=firmware/target/xtensa-esp32s3-none-elf/release/cairn-trail
+# CARGO_TARGET_DIR is set when this runs in a container with the build cache
+# mounted from outside the tree (scripts/build-on-fucina.sh).
+ELF="${CARGO_TARGET_DIR:-firmware/target}/xtensa-esp32s3-none-elf/release/cairn-trail"
 
 for flavour in verbose release; do
   step "firmware: build ${flavour}"

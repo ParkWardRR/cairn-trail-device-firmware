@@ -156,6 +156,20 @@ pub struct Status {
     pub baro_ok: bool,
     pub heading_deg: f32,
     pub accel_mg: [i16; 3],
+    /// The IMU's `WHO_AM_I` as read at init: `0x05` healthy, `0x3E` the
+    /// latched interface (`imu::WHO_AM_I_LATCHED`), `0x00` no reply at all —
+    /// an SPI error rather than a byte. Kept in the status because the board
+    /// speaks native USB, so the verdict printed once at boot is gone by the
+    /// time a terminal attaches.
+    pub imu_whoami: u8,
+    /// |a| in mg from the last sample taken: about 1000 at rest. A frozen or
+    /// fabricated reading does not land on gravity.
+    pub imu_g_mg: u16,
+    /// Edges seen on INT 33 in the data-ready alive test, and whether the pin
+    /// ended the test at a different level than it started. Both zero means
+    /// the test was not run.
+    pub imu_int_edges: u16,
+    pub imu_int_moved: bool,
 
     pub vbat_mv: u16,
     pub vbus_mv: u16,
@@ -246,6 +260,10 @@ pub static STATUS: Mutex<CriticalSectionRawMutex, RefCell<Status>> =
         baro_ok: false,
         heading_deg: 0.0,
         accel_mg: [0; 3],
+        imu_whoami: 0,
+        imu_g_mg: 0,
+        imu_int_edges: 0,
+        imu_int_moved: false,
         vbat_mv: 0,
         vbus_mv: 0,
         battery: false,

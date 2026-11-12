@@ -19,6 +19,51 @@ const RESET_STATUS: u8 = 0x4D;
 
 pub const WHO_AM_I_VALUE: u8 = 0x05;
 
+/// What `WHO_AM_I` reads once the part's SPI interface has latched: `0x3E`,
+/// with `0x0A`/`0x0B` answering `0xDC` and `0x12`/`0x13` answering `0x70`
+/// beside it — the same bytes in both SPI modes and from 100 kHz to 4 MHz.
+///
+/// Bring-up made this state on purpose on 2026-10-25 and found what causes it:
+/// writing `CTRL1` whole with bit 5 clear (`0x40`, address auto-increment
+/// alone). That is why [`Qmi8658::init`] only ever read-modify-writes that
+/// register. Another firmware for this same board read the identical signature
+/// on 2026-11-11 and spent a week on the SPI side before a cold power cycle
+/// cleared it (docs/prior-art.md §10).
+///
+/// **No write clears it.** The part is on VDD3V3 (V3.1 carrier, UX1 pins 5 and
+/// 8) — a rail no software here can drop, and one that stays up from whichever
+/// of USB and the 18650 is still connected. So an ESP32 reset, a PMU rail
+/// cycle, and unplugging one of the two supplies all do nothing. Only a cold
+/// power cycle does: **USB out *and* the cell out**, together, for minutes.
+pub const WHO_AM_I_LATCHED: u8 = 0x3E;
+
+/// `CTRL1` bit 5, set at power-up: clearing it latches the interface, so every
+/// write to `CTRL1` keeps it ([`WHO_AM_I_LATCHED`]).
+const CTRL1_BE: u8 = 0x20;
+/// `CTRL1` bit 6: address auto-increment, what a burst read needs.
+const CTRL1_ADDR_AI: u8 = 0x40;
+/// `CTRL1` bit 3: drive interrupts on INT1 (SensorLib's `enableINT`).
+const CTRL1_INT1_EN: u8 = 0x08;
+/// `CTRL7` bits 0 and 1: accelerometer and gyroscope enable. Data ready
+/// reaches INT1 unless `CTRL7` bit 5 is set, which this firmware never sets
+/// (SensorLib's `enableDataReadyINT`).
+const CTRL7_ENABLE: u8 = 0x03;
+
+/// What a `WHO_AM_I` byte means and what to do about it, so the answer travels
+/// with the symptom instead of living in a document.
+pub fn whoami_hint(id: u8) -> &'static str {
+    match id {
+        WHO_AM_I_VALUE => "QMI8658",
+        WHO_AM_I_LATCHED => {
+            "SPI interface LATCHED. No software clears this: cold power cycle, \
+             USB out AND the cell out, minutes"
+        }
+        0xFF => "nothing answered: CS 34 is not reaching the part, or the bus idles high",
+        0x00 => "MISO held low: another device selected on the shared bus, or no power",
+        _ => "unknown reply: check CS 34, and that the card is deselected",
+    }
+}
+
 /// ±8 g.
 const ACC_RANGE: u8 = 2;
 /// ±512 °/s.
@@ -36,6 +81,25 @@ pub struct Sample {
     /// Tenths of a degree per second.
     pub gyro_ddps: [i16; 3],
     pub temp_c: f32,
+}
+
+impl Sample {
+    /// |a| in mg: about 1000 on a healthy part at rest. The cheapest check
+    /// that a reading is real rather than frozen, because a stuck or
+    /// fabricated value does not land on gravity. `trail verify --stationary`
+    /// applies the same test to a whole session after the fact; this is the
+    /// one the board can report while it runs.
+    pub fn magnitude_mg(&self) -> u16 {
+        let sq: f32 = self
+            .accel_mg
+            .iter()
+            .map(|&v| {
+                let f = v as f32;
+                f * f
+            })
+            .sum();
+        libm::sqrtf(sq) as u16
+    }
 }
 
 impl<S: SpiDevice> Qmi8658<S> {
@@ -112,15 +176,16 @@ impl<S: SpiDevice> Qmi8658<S> {
         let mut ctrl1 = [0u8];
         self.read(CTRL1, &mut ctrl1)?;
         // 0x20 on this part. Bit 5 must stay set: overwriting CTRL1 with 0x40
-        // locked the SPI interface until the board was powered off.
+        // locked the SPI interface, and only a cold power cycle — USB out and
+        // the cell out — brings it back. See `WHO_AM_I_LATCHED`.
         report("ctrl1_default", ctrl1[0], id);
 
         let steps: [(&str, u8, u8, u8); 5] = [
-            ("ctrl1_addr_ai", CTRL1, 0x40, 0x40),
+            ("ctrl1_addr_ai", CTRL1, CTRL1_ADDR_AI, CTRL1_ADDR_AI),
             ("ctrl2_accel", CTRL2, 0x7F, (ACC_RANGE << 4) | ODR_62HZ),
             ("ctrl3_gyro", CTRL3, 0x7F, (GYR_RANGE << 4) | ODR_62HZ),
             ("ctrl5_lpf", CTRL5, 0x77, 0x11),
-            ("ctrl7_enable", CTRL7, 0x03, 0x03),
+            ("ctrl7_enable", CTRL7, CTRL7_ENABLE, CTRL7_ENABLE),
         ];
         for (name, reg, mask, val) in steps {
             let written = self.update(reg, mask, val)?;
@@ -131,6 +196,30 @@ impl<S: SpiDevice> Qmi8658<S> {
             }
         }
         Ok((WHO_AM_I_VALUE, rev[0]))
+    }
+
+    /// Turn the data-ready interrupt on INT1 on or off, read-modify-writing
+    /// only `CTRL1` bit 3. For the alive test on a part that answered: it
+    /// should make INT 33 move, which is how the test earns the right to be
+    /// believed when the part has *not* answered.
+    pub fn int1_enable(&mut self, on: bool) -> Result<u8, S::Error> {
+        self.update(CTRL1, CTRL1_INT1_EN, if on { CTRL1_INT1_EN } else { 0 })
+    }
+
+    /// Arm data-ready on INT1 without reading anything back.
+    ///
+    /// For a part whose `WHO_AM_I` is wrong, where every read is untrustworthy
+    /// but a moving INT 33 would still prove it is powered, alive and taking
+    /// writes — the one measurement left that does not depend on the read
+    /// path. `CTRL1` is written whole here because a read-modify-write of a
+    /// register that cannot be read is worse than useless, and it keeps bit 5
+    /// set ([`WHO_AM_I_LATCHED`]). Every register it touches is volatile, and
+    /// the cold power cycle that clears the state this diagnoses clears these
+    /// too.
+    pub fn int1_arm_blind(&mut self) -> Result<(), S::Error> {
+        self.write(CTRL1, CTRL1_BE | CTRL1_ADDR_AI | CTRL1_INT1_EN)?;
+        self.write(CTRL2, (ACC_RANGE << 4) | ODR_62HZ)?;
+        self.write(CTRL7, CTRL7_ENABLE)
     }
 
     pub fn sample(&mut self) -> Result<Sample, S::Error> {

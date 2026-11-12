@@ -199,3 +199,75 @@ Not ours to fix, but each is a test we should have:
 | MeshCore | The LoRa TX LED is defined as GPIO 6, the GNSS PPS pin; the OLED and BME280 addresses differ between its ini and header | Probe addresses at runtime, never trust a constant |
 | RNode | Its peripheral power-down uses the original T-Beam's rail map on the Supreme — cutting the sensors and leaving GNSS on | Name rails by load, not by number, in the code |
 | Tiny GPS Logger | "GPS off" stops reading the UART but leaves the module powered | Measure current, don't infer it |
+
+## 10. The owner's other firmware for this board
+
+The trail device shares its T-Beam Supreme (`48:ca:43:5b:ed:60`) with two of the owner's own
+projects, so these are not prior art read from a distance — they are measurements from **this
+physical unit**, and the owner's work, with no licence question. Source:
+`tbeam-supreme-firmware-handoff.md` and `tbeam-imu-report.md`, both revised 2026-11-11.
+
+| Firmware | What it is | Where |
+|---|---|---|
+| `tbeam-fw` | A Meshtastic-compatible node feeding a Hackaday Supercon badge over BLE. PlatformIO/Arduino | `~/antigravity/supercon/tbeam-fw` |
+| CarNet Beam | A drive logger built on this board for the BMW CarPlay work, flashed 2026-11-11 | `~/antigravity/bmw-f32-carplay-wan/tbeam` |
+
+**Whichever firmware is on the board, the other two must be restorable.** `tbeam-fw` holds the
+owner's mesh node identity and its BLE bonds in NVS, so a full-image backup comes off the board
+before Cairn is flashed, and only an image taken off *this* board is ever written back.
+
+### The QMI8658 latch, from both sides
+
+`tbeam-fw` read `WHO_AM_I = 0x3E` with `0x0A`/`0x0B` = `0xDC` and `0x12`/`0x13` = `0x70`, and spent
+about a week on the SPI side before a **cold power cycle** cleared it: both SPI modes, 100 kHz to
+4 MHz, dummy bytes, both SPI peripherals, a hand-rolled driver and SensorLib, LilyGO's own example,
+a blind `CTRL1 = 0x20`, and an ALDO2 power cycle. None of it helped, and the register dump did not
+move one bit across a 40× change in clock rate.
+
+**Cairn's bring-up had already produced that exact signature on purpose on 2026-10-25, and knows
+what makes it** ([firmware.md](firmware.md#what-bring-up-found)): writing `CTRL1` whole with bit 5
+clear. The handoff document infers "a stray write while `IMU_CS` was low during SD traffic" and
+labels it inference; this repository has the controlled experiment. Both agree on the only remedy —
+USB out *and* the 18650 out — and on why: the part is on VDD3V3, which no software here can drop
+and which stays up from whichever supply is still connected.
+
+What Cairn took from it, in code:
+
+- `imu::WHO_AM_I_LATCHED` names the byte, and `whoami_hint` carries the remedy into the log, so a
+  failure reads *cold power cycle*, not *unexpected WHO_AM_I*.
+- The status line repeats the verdict. `tbeam-fw` learned the same lesson the same week: on native
+  USB a reset drops the port, so a report printed once from `setup()` produced an **empty capture**.
+- **INT 33 is the alive test**, and `tbeam-fw` never ran it usefully. Its own notes had the pin
+  source-checked from LilyGO's `utilities.h` the whole time; the one attempt that was made used an
+  unconfirmed pin, saw nothing, and was discounted. Cairn runs it on the failure path — and on a
+  healthy part in verbose builds, so the test has been watched passing before anything rests on its
+  silence.
+- `|a| ≈ 1 g` is what made the recovery believable: 1.06 g at rest, seven distinct triples across
+  29 samples, 2972 reads with no failures. The firmware now reports |a| in its status line, and
+  `trail verify --stationary` already fails a session above 1.5 g at rest.
+
+### The rest, worth having
+
+- **The vendor's rail table cost the most time of anything in that investigation.** It labels ALDO2
+  "Sensor" and never names the IMU, so a power-cycle test was run on a rail the IMU is not
+  connected to and counted as evidence for days. [hardware.md](hardware.md#power-rails) names every
+  rail by its load for this reason; so does `pmu::ldo`.
+- **A GNSS fix has been had on this board**: outdoors in a car, 12 satellites, tracked to 41 mph,
+  and a second fix with 10 satellites the same evening. Indoors it reports no fix with sentences
+  flowing normally. The receiver and the antenna are therefore proven; Cairn's own fix path is
+  still [not proven](firmware.md#how-v010-was-verified) on hardware.
+- **`--flash-size keep`, never a literal size.** esptool patches whatever it is given into the
+  bootloader's flash-size header: `16MB` on an 8 MB part made LittleFS fail to mount and silently
+  reformatted a filesystem. Cairn flashes with `espflash`, and its images are saved for an 8 MB
+  part by `scripts/ci.sh`; the trap belongs to anyone reaching for esptool on this board.
+- **Erase and write in one esptool invocation.** A separate `erase-flash` resets the chip out of
+  download mode, and the write that follows fails with "Invalid head of packet" — leaving the flash
+  erased and unwritten.
+- **The SD card must be FAT32 with an MBR**, which is not what macOS Disk Utility produces by
+  default. Cairn's unit has been running a GUID-partitioned card ([hardware.md](hardware.md#read-off-the-unit))
+  because `PartView` reads the partition table itself; Arduino's driver cannot, so a card shared
+  between the two firmwares has to be MBR.
+- **`tbeam-fw` writes ten log streams into `/tbeam/`** on the card. Cairn's sessions live in their
+  own directories, which is what keeps the two from fighting over one card.
+- **The bezel overhangs the glass** by 5 px left and right, 4 px top and bottom. Cairn's screen is
+  off by default, but any layout that reaches the edge of the 128×64 panel is partly behind plastic.

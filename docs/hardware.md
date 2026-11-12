@@ -60,7 +60,7 @@ table is what the PMU driver encodes**, and it names rails by their load.
 | DCDC2 | Nothing (not connected) | — | Off |
 | DCDC3, DCDC4, DCDC5 | The M.2 socket and expansion headers only | — | **Off** — nothing of ours is there |
 | ALDO1 | OLED, BME280, magnetometer, and the **pull-ups of I²C bus 0** | 3.3 V | On while any of them is in use. With ALDO1 off, bus 0 has no pull-ups and hangs |
-| ALDO2 | The expansion header; vendor and Meshtastic say "sensors, and must stay on"; on V3.0 a 0 Ω link may join it to ALDO1 | 3.3 V | **On** until the board shows it can go off |
+| ALDO2 | The expansion header; vendor and Meshtastic say "sensors, and must stay on" — **not the IMU**, whatever the vendor's table implies; on V3.0 a 0 Ω link may join it to ALDO1 | 3.3 V | **On** until the board shows it can go off |
 | **ALDO3** | **The LoRa module, and nothing else** | — | **Never enabled.** The radio is off |
 | ALDO4 | GNSS VCC (powers on at 2.9 V by default) | 3.3 V | On while recording; the receiver's hard off |
 | BLDO1 | microSD (and, on V3.0, the SD level shifters) | 3.3 V | On while the card is in use |
@@ -68,12 +68,20 @@ table is what the PMU driver encodes**, and it names rails by their load.
 | VRTC | GNSS backup supply (V_BCKP) and the PMU IRQ pull-up; alive whenever the cell is | — | Not switchable; why hot start needs the 18650 |
 | VBACKUP, DLDO1/2, CPUSLDO | Nothing | — | Off |
 
-Disagreements to settle on the board:
+**IMU and RTC power: settled, 2026-11-11.** The schematics were right and the vendor's rail table
+was wrong. The V3.1 carrier puts the QMI8658 (UX1) pins 5 (VDDIO) and 8 (VDD) on **VDD3V3**, and
+LilyGO's table — which labels ALDO2 only as "Sensor" and never names the IMU — sent another firmware
+for this board into an **ALDO2 power-cycle test that cycled a rail the IMU is not on**. Three
+measurements on this unit agree with the schematic: the IMU keeps its register state across every
+ESP32 reset, it kept a latched SPI interface across a PMU rail cycle, and that state cleared only
+when both USB *and* the cell came out ([prior-art.md §10](prior-art.md#10-the-owners-other-firmware-for-this-board)).
 
-- **IMU and RTC power.** Both carrier schematics put the QMI8658 and the PCF8563 on VDD3V3. LilyGO's
-  doc and RNode say ALDO1 feeds the IMU; RNode and Meshtastic say ALDO2 feeds the RTC. If the
-  schematics are right, the IMU is always powered — useful for wake-on-motion, a cost to manage
-  with its own power-down mode — and ALDO2 can probably go off.
+So the IMU is **always powered** — useful for wake-on-motion, a cost to manage with the part's own
+power-down mode — and no rail this firmware controls can reset it. ALDO2 can probably go off; the
+IMU is not the reason to keep it.
+
+Disagreements still to settle on the board:
+
 - **Power-off hold time.** LilyGO's code sets 4 s; its doc and SoftRF's wiki say 6 s. Read register
   `0x27`.
 
@@ -88,7 +96,7 @@ so nothing feeds the unpowered chip through them. No SPI traffic and no sleep co
 | I²C bus 0 — OLED, magnetometer, BME280 | SDA 17, SCL 18 |
 | I²C bus 1 — PMU, RTC | SDA 42, SCL 41 |
 | Shared SPI — SD card, IMU | MOSI 35, MISO 37, SCK 36 |
-| IMU | CS 34, INT 33 (through diodes) |
+| IMU | CS 34, INT 33 (through diodes; the direction is not recorded, so the firmware pulls it down and reports what the pin did) |
 | SD card | CS 47 |
 | GNSS UART | ESP TX 8 → receiver RX; receiver TX → ESP RX 9 |
 | GNSS PPS | 6 (through a diode; also lights a PPS LED that cannot be switched off) |
@@ -149,6 +157,15 @@ From XPowersLib (MIT), `src/REG/AXP2101Constants.h` and `src/XPowersAXP2101.tpp`
 - **The SD card and the IMU share one SPI bus.** One owner, behind one mutex; drive SD CS high
   before talking to the IMU, and the IMU's CS high before initialising the card. On V3.1 the SD
   lines have no level shifters, so an unpowered card still sits on the bus.
+- **A bad write to the IMU's `CTRL1` is not recoverable in software.** Clear bit 5 and the SPI
+  interface latches: `WHO_AM_I` answers `0x3E`, `0x0A`/`0x0B` answer `0xDC`, identically at every
+  clock rate and in both SPI modes. Because the part is on VDD3V3, nothing the firmware can do
+  clears it — not a reset, not a rail cycle, not unplugging one supply. **USB out and the cell out,
+  both, for minutes.** This is why every `CTRL1` write is a read-modify-write of one bit, and why
+  the firmware names the byte and the remedy in its status line instead of reporting `imu=0`
+  ([prior-art.md §10](prior-art.md#10-the-owners-other-firmware-for-this-board)).
+- **Report |a|, not a flag.** A healthy part at rest reads about 1000 mg; a frozen or fabricated
+  sample does not land on gravity, so |a| is the cheapest proof that IMU data is real.
 - **I²C bus 0 depends on ALDO1 for its pull-ups.** Turning ALDO1 off to save power turns off the
   display and both I²C sensors together, and the bus must not be touched until it is back.
 - **Deep sleep on this board measures about 1.45 mA** (LilyGO's figure) — about three times what
@@ -187,7 +204,7 @@ Read on 2026-10-25 by esptool and by firmware v0.1.0 (logs in [`evidence/`](../e
 | PMU rails at power-up | `dcdc=0x19` (DC1, DC4, DC5), `ldo=0x17` (**ALDO3 — the radio — on**, ALDO1, ALDO2, BLDO1; ALDO4 off); ALDO1 and BLDO1 at 1.8 V, the rest 3.3 V | registers `0x80`, `0x90`, `0x92`–`0x97` | 2026-10-25 |
 | Rails as Cairn sets them | `ldo=0x1b`: ALDO1, ALDO2, ALDO4, BLDO1 at 3.3 V; **ALDO3 off** | same | 2026-10-25 |
 | Power key timing | `0x14`: long-press IRQ 1.5 s, **power-off hold 6 s**, power-on 128 ms | register `0x27` | 2026-10-25 |
-| What feeds the IMU and the RTC | Not separately tested; the IMU kept its state across every ESP32 reset and cleared only on a full power-off, consistent with the schematics' always-on 3V3 | behaviour | 2026-10-25 |
+| What feeds the IMU and the RTC | **VDD3V3** (schematic, and confirmed by behaviour): the IMU kept its state across every ESP32 reset, kept it across an ALDO2 cycle, and cleared only when USB and the cell were both out | behaviour, schematic | 2026-10-25, 2026-11-11 |
 | RTC on first read | `2026-09-30T23:41:48`, voltage-low clear: **about 25 days wrong** (set by Meshtastic) | PCF8563 | 2026-10-25 |
 | 18650 fitted | **No** (PMU battery-present clear, VBAT 0) | PMU status | 2026-10-25 |
 | SD card used | 62.6 GB SDXC, reformatted FAT32 under a GUID partition map | firmware | 2026-10-25 |

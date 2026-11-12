@@ -209,7 +209,13 @@ async fn main(spawner: Spawner) -> ! {
     .with_miso(p.GPIO37);
     let sd_cs = Output::new(p.GPIO47, Level::High, OutputConfig::default());
     let imu_cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
-    spawner.spawn(storage::storage_task(spi, sd_cs, imu_cs).unwrap());
+    // The IMU's INT1, for the data-ready alive test: the only check that still
+    // means anything when the part's WHO_AM_I is wrong, because it needs no
+    // read path. The line goes through diodes and their direction is not
+    // recorded, so it is pulled down on the assumption that data ready is an
+    // active-high pulse; `int33_alive_test` reports what the pin actually did.
+    let imu_int = Input::new(p.GPIO33, InputConfig::default().with_pull(Pull::Down));
+    spawner.spawn(storage::storage_task(spi, sd_cs, imu_cs, imu_int).unwrap());
 
     spawner.spawn(tasks::pmu_task(pmu).unwrap());
     spawner.spawn(

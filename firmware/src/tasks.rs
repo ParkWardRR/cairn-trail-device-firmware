@@ -248,7 +248,7 @@ fn print_stat() {
          session S{:04} sd_ok={} recording={} bytes={} dropped={} write_errors={}\n\
          gnss seen={} model={} fix_ok={} type={} sv={}/{} lat={:.6} lon={:.6} hmsl={:.1}m h_acc={:.1}m v_acc={:.1}m pvt={} ubx_crc_err={}\n\
          baro ok={} p={:.1}Pa t={:.2}C rh={:.1}% elev={:.1}m gain={:.1}m loss={:.1}m anchored={}\n\
-         imu ok={} accel_mg={:?}  mag ok={} heading={:.0}\n\
+         imu ok={} whoami=0x{:02x} ({}) |a|={}mg accel_mg={:?} int33_edges={} int33_moved={}  mag ok={} heading={:.0}\n\
          power battery={} vbat={}mV vbus={}mV charging={} soc={}%  marks={} display={}\n\
          assistnow queued={} sent={} accepted={} not_used={}\n\
          prime {:?} time_acc={}ms pos_acc={}m rtc_now={:?} rtc_checked={} wifi_fingerprints={}",
@@ -286,7 +286,12 @@ fn print_stat() {
         s.loss_m,
         s.qnh_anchored,
         s.imu_ok,
+        s.imu_whoami,
+        crate::imu::whoami_hint(s.imu_whoami),
+        s.imu_g_mg,
         s.accel_mg,
+        s.imu_int_edges,
+        s.imu_int_moved,
         s.mag_ok,
         s.heading_deg,
         s.battery,
@@ -777,8 +782,28 @@ pub async fn status_task() {
         } else {
             let _ = write!(fix, "nofix {}/{}sv", s.num_sv, s.sats_visible);
         }
+        // The IMU's verdict repeats here on purpose. The board speaks native
+        // USB, so a reset drops the port: anything printed once at boot is
+        // gone before a terminal can attach, and a bare imu=0 sends the next
+        // person back to the SPI side instead of to the power cycle that
+        // actually clears a latched part.
+        // 64, not 40: the latched message is 44 characters, and a heapless
+        // String that fills up truncates mid-word.
+        let mut imu: String<64> = String::new();
+        if s.imu_ok {
+            let _ = write!(imu, "ok |a|={}mg", s.imu_g_mg);
+        } else if s.imu_whoami == crate::imu::WHO_AM_I_LATCHED {
+            let _ = write!(imu, "LATCHED 0x3e: cold power cycle (USB+cell out)");
+        } else {
+            let _ = write!(
+                imu,
+                "FAIL whoami=0x{:02x} int33={}",
+                s.imu_whoami,
+                if s.imu_int_moved { "alive" } else { "quiet" }
+            );
+        }
         log::info!(
-            "S{:04} sd={} {}B drop={} | gnss {} pvt={} | {:.1}hPa elev={:.1}m +{:.0}/-{:.0} | imu={} mag={} | vbus={}mV bat={}mV",
+            "S{:04} sd={} {}B drop={} | gnss {} pvt={} | {:.1}hPa elev={:.1}m +{:.0}/-{:.0} | imu {} mag={} | vbus={}mV bat={}mV",
             s.session,
             s.sd_ok as u8,
             s.sd_bytes,
@@ -789,7 +814,7 @@ pub async fn status_task() {
             s.elevation_m,
             s.gain_m,
             s.loss_m,
-            s.imu_ok as u8,
+            imu,
             s.mag_ok as u8,
             s.vbus_mv,
             s.vbat_mv

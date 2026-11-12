@@ -14,7 +14,7 @@ use core::cell::RefCell;
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
 
-use embassy_time::{Duration, Instant, Ticker};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_hal::digital::{ErrorType, OutputPin};
 use embedded_hal_bus::spi::RefCellDevice;
 use embedded_sdmmc::{
@@ -22,7 +22,7 @@ use embedded_sdmmc::{
 };
 use esp_hal::Blocking;
 use esp_hal::delay::Delay;
-use esp_hal::gpio::Output;
+use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use heapless::String;
@@ -968,8 +968,85 @@ fn assist_step(vm: &Vm, a: &mut AssistFeed) -> bool {
     true
 }
 
+/// INT 33, the data-ready alive test. It needs no read path, which is what
+/// makes it the one measurement that still means something when `WHO_AM_I` is
+/// wrong: a pin that moves proves the part is powered, alive and taking
+/// writes, and a pin that does not says the fault is not the read direction
+/// alone.
+///
+/// It runs whenever the IMU did not come up — and, in a verbose build, on a
+/// part that did, because a test nobody has ever watched pass cannot be read
+/// as evidence when it fails. Another firmware for this board got a zero-edge
+/// result from exactly this test and had to set it aside for that reason
+/// ([prior-art.md §10](../../docs/prior-art.md)).
+///
+/// INT 33 reaches the ESP32 through diodes and which way they face is not
+/// recorded, so `main` pulls the pin down on the assumption that data ready is
+/// an active-high pulse. Counts are reported raw, so one run settles the
+/// assumption instead of an argument.
+async fn int33_alive_test<S: embedded_hal::spi::SpiDevice>(
+    imu: &mut Qmi8658<S>,
+    int: &Input<'static>,
+    imu_ok: bool,
+) {
+    let before = int.is_high();
+    let armed = if imu_ok {
+        cfg!(feature = "verbose") && imu.int1_enable(true).is_ok()
+    } else {
+        imu.int1_arm_blind().is_ok()
+    };
+    if !armed {
+        return;
+    }
+    // At 62.5 Hz that is about 30 pulses in the window. Data ready can also
+    // stay asserted until a sample is read, which shows as a single edge, so
+    // the verdict is whether the pin moved at all, not how often.
+    let until = Instant::now() + Duration::from_millis(500);
+    let mut last = before;
+    let mut edges: u16 = 0;
+    while Instant::now() < until {
+        Timer::after(Duration::from_millis(1)).await;
+        let now = int.is_high();
+        if now != last {
+            edges = edges.saturating_add(1);
+            last = now;
+        }
+    }
+    // `last` only moves when an edge is seen, so one edge is the whole test.
+    let moved = edges > 0;
+    let level = |high: bool| if high { "high" } else { "low" };
+    event(
+        "imu_int33",
+        format_args!(
+            "{} edges in 500 ms, {} -> {}: {}",
+            edges,
+            level(before),
+            level(last),
+            match (moved, imu_ok) {
+                (true, _) => "alive, powered and taking writes",
+                (false, true) =>
+                    "no movement from a working part: INT 33 is not an alive test on this board",
+                (false, false) => "no movement: latched or unpowered, not a read path alone",
+            }
+        ),
+    );
+    with_status(|s| {
+        s.imu_int_edges = edges;
+        s.imu_int_moved = moved;
+    });
+    if imu_ok {
+        // Leave the register as the release build has it.
+        let _ = imu.int1_enable(false);
+    }
+}
+
 #[embassy_executor::task]
-pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'static>) {
+pub async fn storage_task(
+    mut bus: Bus,
+    sd_cs: Output<'static>,
+    imu_cs: Output<'static>,
+    imu_int: Input<'static>,
+) {
     let delay = Delay::new();
     // Both chip selects high before anything talks on the bus, then the SD
     // card's 74+ idle clocks with CS high (SD spec 6.4.1).
@@ -1010,29 +1087,36 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
         "diag_imu",
         format_args!("regs00..0f={:02x?}", imu.dump().ok()),
     );
-    let imu_ok = match imu.init(&mut d, |step, value, whoami| {
+    let (imu_whoami, imu_ok) = match imu.init(&mut d, |step, value, whoami| {
         event(
             "imu_step",
             format_args!("{} value=0x{:02x} whoami=0x{:02x}", step, value, whoami),
         )
     }) {
-        Ok((0x05, rev)) => {
+        Ok((crate::imu::WHO_AM_I_VALUE, rev)) => {
             event(
                 "imu",
                 format_args!("QMI8658 revision 0x{:02x}, +-8 g, +-512 dps, 62.5 Hz", rev),
             );
-            true
+            (crate::imu::WHO_AM_I_VALUE, true)
         }
         Ok((id, _)) => {
-            event("imu", format_args!("unexpected WHO_AM_I 0x{:02x}", id));
-            false
+            event(
+                "imu",
+                format_args!("WHO_AM_I 0x{:02x}: {}", id, crate::imu::whoami_hint(id)),
+            );
+            (id, false)
         }
         Err(_) => {
-            event("imu", format_args!("SPI error"));
-            false
+            event("imu", format_args!("SPI error: no byte came back at all"));
+            (0, false)
         }
     };
-    with_status(|s| s.imu_ok = imu_ok);
+    with_status(|s| {
+        s.imu_ok = imu_ok;
+        s.imu_whoami = imu_whoami;
+    });
+    int33_alive_test(&mut imu, &imu_int, imu_ok).await;
     // The first samples after enabling are garbage while the low-pass filters
     // settle (about 1.7 Hz at this rate; seen up to 3.7 g at rest for ~0.5 s):
     // record from one second after enabling.
@@ -1170,7 +1254,15 @@ pub async fn storage_task(mut bus: Bus, sd_cs: Output<'static>, imu_cs: Output<'
                     }
                     if imu_n.is_multiple_of(50) {
                         log::debug!("IMU {}", line.trim_end());
-                        with_status(|st| st.accel_mg = s.accel_mg);
+                        // |a| travels with the axes: at rest it reads about
+                        // 1000 mg, and a frozen or fabricated sample does not
+                        // land on gravity. It is what makes "the IMU is
+                        // working" a measurement rather than a flag.
+                        let g = s.magnitude_mg();
+                        with_status(|st| {
+                            st.accel_mg = s.accel_mg;
+                            st.imu_g_mg = g;
+                        });
                     }
                 }
             }

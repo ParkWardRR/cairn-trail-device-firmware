@@ -25,7 +25,7 @@ column where a source supplies it, never the index.
 | `MAG.CSV` | 10 Hz | QMC6309 (QMC6310 on V3.0 carriers), ±8 G: raw `mx/my/mz`, `range_g`, `heading_deg_uncal` (uncalibrated: no hard/soft-iron correction yet) |
 | `POWER.CSV` | every 5 s | AXP2101: `vbat_mv`, `vbus_mv`, `vsys_mv`, `battery`, `charging`, `vbus_good`, `soc_gauge_pct` (the PMU's gauge), `soc_curve_pct` (from an 18650 OCV curve), `die_temp_c`, and the `dcdc` / `ldo` rail-enable bytes — so the LoRa rail (ALDO3, bit 2 of `ldo`) is shown off in every row |
 | `PPS.CSV` | 1 Hz | The receiver's time pulse on GPIO 6, timestamped in µs since boot (`t_us`): how the two clocks drift. Empty until the receiver has a fix — it emits no pulse before one |
-| `EVENTS.CSV` | as they happen | `event`, `detail`: boot and build identity, the PMU's rails as found and as set, the RTC as found and any correction from GNSS, every IMU init step, I²C devices found, the SD card and its partition layout, the GNSS receiver's firmware and configuration acknowledgements, fix acquired and lost, button presses, marks, write errors |
+| `EVENTS.CSV` | as they happen | `event`, `detail`: boot and build identity, the PMU's rails as found and as set, the RTC as found and any correction from GNSS, every IMU init step with the `WHO_AM_I` it left behind and the INT 33 alive test's result, I²C devices found, the SD card and its partition layout, the GNSS receiver's firmware and configuration acknowledgements, fix acquired and lost, button presses, marks, write errors |
 | `INFO.TXT` | once | Firmware version, flavour and commit (a dirty tree says so), MAC, session |
 
 Rows are buffered per file and written in 2 KiB blocks; every file is flushed (its directory entry
@@ -83,9 +83,23 @@ $T console --reset --seconds 30 --log boot.log       # a boot, captured
 $T verify pulled/S0007 --stationary
 ```
 
-## Building, flashing, releasing — all local
+## Building, flashing, releasing
 
-There is no hosted CI for this repository: the owner chose local CI/CD.
+There is no hosted CI for this repository: the owner chose local CI/CD. **Builds run on fucina**,
+not on the Mac — one script does the whole of `ci.sh` there, in a rootless podman container, and
+brings `dist/` back:
+
+```sh
+scripts/build-on-fucina.sh               # capacity check, sync, ci.sh in a container, pull dist/
+scripts/build-on-fucina.sh --no-pull     # build and test only
+```
+
+The container is built from [`scripts/fucina/Containerfile`](../scripts/fucina/Containerfile) on
+first use and pins the **same esp toolchain version the Mac has** (1.97.0.0), so a binary built
+either way is the same binary — raise it in both places or neither. Caches live in
+`~/builds/.cache/cairn-trail` on fucina, outside the synced tree.
+
+Flashing is not a build and stays on the Mac. For that, and to run CI locally if fucina is down:
 
 ```sh
 espup install --targets esp32s3          # once: the Xtensa toolchain
@@ -100,14 +114,22 @@ scripts/release.sh v0.1.0 notes.md       # clean tree only: CI, tag, GitHub rele
 
 `dist/` holds, per flavour, the ELF and a merged image (bootloader + partition table + app) to
 write at `0x0`:
-`esptool --chip esp32s3 write-flash 0x0 cairn-trail-<version>-<commit>-release.bin`.
+`esptool --chip esp32s3 --flash-size keep write-flash 0x0 cairn-trail-<version>-<commit>-release.bin`.
+
+**Pass `--flash-size keep`, never a literal size.** esptool patches whatever it is given into the
+bootloader's flash-size header, so a wrong value mis-maps the flash: `16MB` on an 8 MB part cost
+another firmware for this board a silently reformatted filesystem
+([prior-art.md §10](prior-art.md#10-the-owners-other-firmware-for-this-board)).
 
 **From stock Meshtastic**, the first flash needs the board in its ROM bootloader. Its TinyUSB
 serial port does not answer esptool's reset, but opening it at 1200 baud reboots it into the
 bootloader; that reboot also sets the RTC's *force download boot* bit (`RTC_CNTL_OPTION1`,
 `0x6000812C`), after which every reset returns to the bootloader until the bit is cleared.
 `scripts/flash.sh` clears it. A full backup of the stock image is in `~/cairn-backups`
-(SHA-256 `1a1310d3…05c36`); restoring it is `esptool write-flash 0x0 <backup>`.
+(SHA-256 `1a1310d3…05c36`); restoring it is `esptool --flash-size keep write-flash 0x0 <backup>`.
+Erase and write in **one** invocation: a separate `erase-flash` resets the chip out of download
+mode, and the write that follows fails with "Invalid head of packet" on a flash that is now erased
+and unwritten.
 
 ## AssistNow
 
@@ -333,7 +355,10 @@ S0026, at rest): |a| between 874 and 1080 mg from the first row; `trail verify -
 fails any session with a sample above 1.5 g at rest.
 
 **Not yet proven:** a GNSS fix (and therefore PPS, RTC correction from GNSS and the elevation
-anchoring), the display and BOOT button by eye, battery operation and charging, and long runs.
+anchoring), the display and BOOT button by eye, battery operation and charging, and long runs. The
+*receiver* is no longer in doubt — another firmware had 12 satellites and 41 mph out of this board
+and this antenna on 2026-11-11 ([prior-art.md §10](prior-art.md#10-the-owners-other-firmware-for-this-board))
+— so what is unproven here is Cairn's own fix path, and indoors is not where to test it.
 
 ## What bring-up found
 
@@ -343,6 +368,20 @@ Each of these cost a debugging round on the real board; they are now handled in 
   with `0x40` (address auto-increment only) locked the IMU's SPI interface — reads returned
   `0x3E`/`0xDC` — until the board was powered off; the IMU is on the always-on 3V3 rail, so no
   ESP32 reset clears it. Setting only bit 6 (`0x60`), as SensorLib does, works.
+
+  **How much that one byte is worth knowing:** another firmware for this board met the same
+  `0x3E` and spent about a week on the SPI side — both modes, 100 kHz to 4 MHz, two drivers, the
+  vendor's own example, an ALDO2 power cycle — before pulling USB *and* the cell cleared it. No
+  rail this firmware controls reaches the part. So the latch is now named in the code
+  (`imu::WHO_AM_I_LATCHED`), its remedy travels with it (`imu::whoami_hint`), and the status line
+  repeats the verdict rather than printing it once at boot, which on native USB is the same as not
+  printing it ([prior-art.md §10](prior-art.md#10-the-owners-other-firmware-for-this-board)).
+- **INT 33 is the alive test.** It needs no read path, so it is the only measurement left when
+  `WHO_AM_I` is wrong: data ready on INT1, and a pin that moves proves the part is powered, alive
+  and taking writes. It runs whenever the IMU fails to come up, and in verbose builds on a part
+  that came up fine — because a test nobody has watched pass cannot be read as evidence when it
+  fails. The line reaches the ESP32 through diodes whose direction is not recorded, so the pin is
+  pulled down and the event reports the raw edge count and both levels.
 - **Probing I²C addresses 0x78–0x7F wedges the QMC6309** at `0x7C` until the next power-off. Those
   addresses are reserved for 10-bit addressing; the scan stops at `0x77` and the magnetometer is
   identified by chip ID.

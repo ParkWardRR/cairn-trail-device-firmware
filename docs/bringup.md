@@ -65,7 +65,13 @@ Nothing else answers until this works.
 
 - Drive SD CS (47) and IMU CS (34) high before either is initialised.
 - QMI8658: WHO_AM_I `0x05`, soft reset, accelerometer and gyroscope readings; then the pedometer
-  and wake-on-motion configuration, with the interrupt on GPIO 33 seen toggling.
+  and wake-on-motion configuration, with the interrupt on GPIO 33 seen toggling. **Never write
+  `CTRL1` whole** — clearing bit 5 latches the SPI interface, and only pulling USB *and* the cell
+  brings it back ([hardware.md](hardware.md#things-that-shape-the-firmware)).
+- **The INT 33 check earns its keep later, not here.** It is the only alive test that works without
+  a read path, so a verbose build runs it on a healthy part on purpose: a test whose pass nobody
+  has watched cannot be trusted when it fails. Record the edge count and both pin levels — the
+  line runs through diodes and their direction is still unrecorded.
 - SD (BLDO1 on): mount, write a file, read it back — alternating with IMU reads in the same loop,
   so the bus sharing is proven under load, not assumed.
 - Pass: thousands of interleaved IMU reads and card writes with no error and no corruption.

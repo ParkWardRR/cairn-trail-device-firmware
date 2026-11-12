@@ -258,11 +258,13 @@ lives in [`crates/trail-core`](crates/trail-core/) with host tests.
 
 Getting there found six board-level traps, each written up in
 [docs/firmware.md](docs/firmware.md#what-bring-up-found): an IMU register that locks its SPI port
-until power-off if written whole, an I²C address scan that wedges the compass, an SD card that
-corrupts the shared bus unless it is initialised first, the radio powered on by default, the GPS
-keeping a previous firmware's settings, and a clock that was 25 days wrong but looked fine. The
-board's full wiring is in [docs/hardware.md](docs/hardware.md); lessons from eight other firmware
-projects for this board are in [docs/prior-art.md](docs/prior-art.md).
+if written whole — and only a cold power cycle, USB *and* the cell out, unlocks it — an I²C address
+scan that wedges the compass, an SD card that corrupts the shared bus unless it is initialised
+first, the radio powered on by default, the GPS keeping a previous firmware's settings, and a clock
+that was 25 days wrong but looked fine. The board's full wiring is in
+[docs/hardware.md](docs/hardware.md); lessons from eight other firmware projects for this board,
+and from the owner's own two that share this very unit, are in
+[docs/prior-art.md](docs/prior-art.md).
 
 ## What is next
 

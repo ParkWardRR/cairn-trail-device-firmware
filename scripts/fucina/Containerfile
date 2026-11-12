@@ -1,0 +1,23 @@
+# The build image for fucina, used by scripts/build-on-fucina.sh.
+#
+# Espressif's image carries the Xtensa Rust fork, ldproxy, espflash and a
+# matching clang and xtensa-esp-elf, so nothing has to be installed on the
+# build host itself.
+FROM docker.io/espressif/idf-rust:esp32s3_latest
+
+# The base image ships esp 1.93.0.0; firmware/Cargo.toml asks for 1.95, and the
+# Mac builds this with 1.97.0.0. Pin that, so a binary built here and a binary
+# built on the Mac are the same binary. Raise it here and in the Mac's
+# `espup install` together, never one alone.
+RUN espup install --targets esp32s3 --toolchain-version 1.97.0.0 \
+ && rm -rf /home/esp/.rustup/downloads /home/esp/.rustup/tmp
+
+# scripts/ci.sh runs trail-core, the host tool and the format/v3 conformance on
+# stable; only the firmware itself needs the fork. Pinned to the Mac's stable,
+# because clippy runs with `-D warnings`: plain `stable` here was 1.99, whose
+# clippy fails trail-core on a lint (`chunks_exact_to_as_chunks`) that did not
+# exist when the code was written. Bump this when the Mac's stable moves, so
+# the lint set is a decision rather than a surprise.
+ENV CI_STABLE_TOOLCHAIN=1.93.0
+RUN rustup toolchain install 1.93.0 --profile minimal -c clippy -c rustfmt \
+ && rm -rf /home/esp/.rustup/downloads /home/esp/.rustup/tmp
